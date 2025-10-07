@@ -16,12 +16,9 @@ from babelbit.chute_template.schemas import (
     BBPredictOutput,
 )
 from babelbit.utils.settings import get_settings
-# from babelbit.utils.video_processing import download_video
-# from babelbit.utils.image_processing import image_to_base64, pil_from_array
 from babelbit.utils.async_clients import get_async_client
 
 settings = get_settings()
-# import scorevision.chute_template.load
 chute_template_load_spec = spec_from_file_location(
     "chute_load",
     str(settings.PATH_CHUTE_TEMPLATES / settings.FILENAME_CHUTE_LOAD_UTILS),
