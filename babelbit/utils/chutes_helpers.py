@@ -150,7 +150,7 @@ async def share_chute(chute_id: str) -> None:
     logger.info(
         "🤝 Temporary fix: Sharing private chute with the only testnet Vali to allow querying"
     )
-    TESTNET_VALIDATOR_CHUTES_ID = "036aed78-6188-5919-94cb-71b61ededd63"
+    VALIDATOR_CHUTES_ID = "80c9c6eb-5c5c-5ddf-bbe7-e4a20813197d"
 
     settings = get_settings()
     proc = await create_subprocess_exec(
@@ -159,7 +159,7 @@ async def share_chute(chute_id: str) -> None:
         "--chute-id",
         chute_id,
         "--user-id",
-        TESTNET_VALIDATOR_CHUTES_ID,
+        VALIDATOR_CHUTES_ID,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         stdin=subprocess.PIPE,
