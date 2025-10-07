@@ -1,0 +1,12 @@
+{
+  "challenge_uid": "challenge-real-e2e",
+  "dialogues": [
+    {
+      "dialogue_uid": "dlg-real-1",
+      "utterances": [
+        "Hello world",
+        "How are you"
+      ]
+    }
+  ]
+}

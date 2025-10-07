@@ -1,0 +1,157 @@
+@startuml
+!define RECTANGLE_WIDTH 160
+!define RECTANGLE_HEIGHT 40
+
+left to right direction
+skinparam linetype ortho
+skinparam shadowing false
+skinparam rectangle {
+  BackgroundColor white
+  BorderColor #444444
+  RoundCorner 8
+  FontSize 10
+}
+skinparam packageStyle rectangle
+skinparam defaultTextAlignment center
+skinparam ArrowColor #555555
+skinparam ArrowThickness 1
+skinparam wrapWidth 140
+skinparam maxMessageSize 120
+
+' =============================================================
+' High-Level Updated Architecture (2025-09)
+' =============================================================
+' Legend:
+'  - Brown  : Miner-side responsibilities
+'  - LightBlue : Core Babelbit validator / runner system
+'  - LightGreen : Live validation workflow (runtime scoring + weighting)
+'  - Beige  : Docker deployment units
+'  - Gray   : External services
+'  - Purple : Persistence / Data Artifacts
+'
+
+rectangle "Docker Deployment" as DOCKER #EEE9D5 {
+  rectangle "Validator\n:8001" as VALIDATOR_C #D5CBB8
+  rectangle "Runner\n:8002" as RUNNER_C #D5CBB8
+  rectangle "Signer API\n:8080" as SIGNER_C #D5CBB8
+}
+
+package "Babelbit System" as CORE #E8F2FD {
+  rectangle "CLI\n(bb command)" as CLI #DCEBFA
+  rectangle "Runner API\n(runner.py)" as RUNNER_API #FFFFFF
+  rectangle "Validator\n(validate.py)" as VALIDATE_P #FFFFFF
+  rectangle "Signer API\n(signer_api.py)" as SIGNER_API #FFFFFF
+  rectangle "Miner Registry\n(on-chain)" as REGISTRY #F5FFFA
+  rectangle "Chutes Template\n(wrapper)" as CHUTES_TEMPLATE #F5FFFA
+  rectangle "Scoring Modules\n(dialogue/challenge)" as SCORING_MODS #FFFFFF
+  rectangle "Postgres Pool\n(db_pool.py)" as DB_POOL #FFFFFF
+}
+
+rectangle "Miner Workflow" as MINER_WF #4B3F32 {
+  rectangle "1. Train\nModel" as TRAIN #6A5B4F
+  rectangle "2. bb push\n(HF upload)" as PUSH #6A5B4F
+  rectangle "3. Deploy\nto Chutes" as DEPLOY_CHUTES #6A5B4F
+  rectangle "4. Register\non Bittensor" as REGISTER_BT #6A5B4F
+}
+
+rectangle "Validator Workflow" as VAL_WF #E4F7E4 {
+  rectangle "Fetch Dialogues\n(utterance engine)" as FETCH_DIALOGUES #FFFFFF
+  rectangle "Invoke Chutes\n(predictions)" as CALL_CHUTES #FFFFFF
+  rectangle "Raw Logs\n(*.jsonl)" as RAW_LOGS #FFFFFF
+  rectangle "Score Dialogues\n(score_jsonl)" as SCORE_DIALOGUES #FFFFFF
+  rectangle "Persist Scores\n(*.json)" as PERSIST_SCORES #FFFFFF
+  rectangle "Update Weights\n(future)" as UPDATE_WEIGHTS #FFFFFF
+}
+
+rectangle "Data Persistence" as DATA_PERSIST #F2F0F5 {
+  rectangle "Raw Logs\n./logs" as LOG_DIR #FFFFFF
+  rectangle "Scores\n./scores" as SCORES_DIR #FFFFFF
+  rectangle "Postgres DB\n(staging tables)" as PG_DB #FFFFFF
+}
+
+rectangle "External Services" as EXTERNAL #EEEEEE {
+  rectangle "HuggingFace\nHub" as HF #FFFFFF
+  rectangle "Chutes.ai\nDeployment" as CHUTES_DEPLOY #FFFFFF
+  rectangle "Bittensor\nNetwork" as BITTENSOR #FFFFFF
+  rectangle "Utterance\nEngine" as UTT_ENGINE #FFFFFF
+}
+
+
+' Relationships (Deployment)
+DOCKER -[dashed]-> CORE
+DOCKER -[dashed]-> VAL_WF
+
+' Miner workflow outward
+TRAIN --> PUSH
+PUSH --> DEPLOY_CHUTES
+DEPLOY_CHUTES --> REGISTER_BT
+PUSH --> HF
+DEPLOY_CHUTES --> CHUTES_DEPLOY
+REGISTER_BT --> BITTENSOR
+
+' CLI interactions
+CLI --> PUSH : bb push
+CLI --> RUNNER_API : bb runner
+CLI --> SIGNER_API : signing
+CLI --> VALIDATE_P : bb validate
+
+' Runner orchestration
+RUNNER_API --> REGISTRY : list miners
+RUNNER_API --> FETCH_DIALOGUES : start sessions
+FETCH_DIALOGUES --> CALL_CHUTES : token loop
+CALL_CHUTES --> RAW_LOGS : emit events
+RAW_LOGS --> SCORE_DIALOGUES : per-dialogue scoring
+SCORE_DIALOGUES --> PERSIST_SCORES : persist JSON
+PERSIST_SCORES --> DB_POOL : staging (opt)
+
+' Dialogue fetching pipeline
+UTT_ENGINE --> FETCH_DIALOGUES : dialogues
+
+' Scoring artifacts
+RAW_LOGS --> LOG_DIR
+PERSIST_SCORES --> SCORES_DIR
+
+' Database writes (conditional BB_ENABLE_DB_WRITES)
+DB_POOL --> PG_DB
+RAW_LOGS --> PG_DB : json_staging (opt)
+PERSIST_SCORES --> PG_DB : scoring + summary
+SCORE_DIALOGUES --> PG_DB : submissions
+
+' Registry & weighting
+REGISTRY --> RUNNER_API : miner metadata
+SCORE_DIALOGUES --> UPDATE_WEIGHTS : future weight calc
+UPDATE_WEIGHTS --> BITTENSOR : set weights
+
+' External re-scoring / offline analytics
+
+' Template & chutes path
+CHUTES_TEMPLATE --> CHUTES_DEPLOY : build image
+CHUTES_DEPLOY --> CALL_CHUTES : inference
+
+' Future extension (LLM/VLM advanced scoring)
+
+note bottom of PG_DB
+  Tables:
+  • json_staging
+  • scoring_staging  
+  • scoring_submissions
+end note
+
+note right of RUNNER_API
+  Orchestration:
+  1. fetch miners
+  2. fetch dialogues
+  3. stream predictions
+  4. write raw logs
+  5. score & persist
+end note
+
+' Legend block
+rectangle "Legend\n• Brown: Miner side\n• Blue: Core system\n• Green: Validation\n• Purple: Persistence\n• Gray: External" as LEGEND #FFFFFF
+LEGEND -[dotted]-> CORE
+LEGEND -[dotted]-> MINER_WF
+LEGEND -[dotted]-> VAL_WF
+LEGEND -[dotted]-> DATA_PERSIST
+LEGEND -[dotted]-> EXTERNAL
+
+@enduml
