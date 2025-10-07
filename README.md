@@ -44,6 +44,11 @@ You can improve our script; improve our model; replace the model with your own b
 
 Knock yourselves out. This is a creative field, in which the winners will be making a gigantic contribution to technology. 
 
+We have just added **one million utterances** of test data in a free repository:
+
+https://github.com/babelbit/miner-test-data
+
+This is all formatted to work with the test tools, and uses the same JSON schema as the validation data. 
 
 
 # Setup 
