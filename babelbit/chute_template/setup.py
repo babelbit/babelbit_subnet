@@ -8,7 +8,7 @@ def init_chute(username: str, name: str) -> Chute:
         .from_base("parachutes/python:3.12")
         .run_command("pip install --upgrade setuptools wheel")
         .run_command(
-            "pip install pillow==10.0.1 huggingface_hub==0.19.4 ultralytics==8.0.206 'torch<2.6' transformers pydantic"
+            "pip install pillow==10.0.1 huggingface_hub==0.19.4 'torch<2.6' transformers pydantic"
         )
         .set_workdir("/app")
     )

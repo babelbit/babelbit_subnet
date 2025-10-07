@@ -31,23 +31,17 @@ chute_template_load.AutoTokenizer = AutoTokenizer
 chute_template_load.AutoModelForCausalLM = AutoModelForCausalLM
 chute_template_load_spec.loader.exec_module(chute_template_load)
 
-# import scorevision.chute_template.predict
 chute_template_predict_spec = spec_from_file_location(
     "chute_predict",
     str(settings.PATH_CHUTE_TEMPLATES / settings.FILENAME_CHUTE_PREDICT_UTILS),
 )
 chute_template_predict = module_from_spec(chute_template_predict_spec)
 chute_template_predict.Any = Any
-# chute_template_predict.Image = Image
 chute_template_predict.randint = randint
 chute_template_predict.format_exc = format_exc
 chute_template_predict.torch = torch
 chute_template_predict.BBPredictedUtterance = BBPredictedUtterance
 chute_template_predict.BBPredictOutput = BBPredictOutput
-# chute_template_predict.SVFrameResult = SVFrameResult
-# chute_template_predict.SVPredictInput = SVPredictInput
-# chute_template_predict.SVPredictOutput = SVPredictOutput
-# chute_template_predict.SVBox = SVBox
 chute_template_predict_spec.loader.exec_module(chute_template_predict)
 
 logger = getLogger(__name__)

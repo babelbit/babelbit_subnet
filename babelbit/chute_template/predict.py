@@ -3,12 +3,6 @@ from traceback import format_exc
 import os
 import torch
 
-# Import the schemas - these should be available in the chute environment
-try:
-    from babelbit.chute_template.schemas import BBPredictedUtterance, BBPredictOutput
-except ImportError:
-    # Fallback imports if the above doesn't work in the chute environment
-    from schemas import BBPredictedUtterance, BBPredictOutput
 
 # Simple in-process cache for tokenized static prompt prefixes.
 _PROMPT_CACHE: dict[str, torch.Tensor] = {}

@@ -6,10 +6,8 @@ from traceback import format_exc
 from random import randint
 
 from pydantic import BaseModel
-# from PIL import Image
 
 from huggingface_hub import snapshot_download
-# from ultralytics import YOLO
 
 from chutes.chute import Chute, NodeSelector
 from chutes.image import Image as ChutesImage
