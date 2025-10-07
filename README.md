@@ -1,11 +1,5 @@
 # BabelBit
 
-Mine BabelBit.
-
-TODO: update discord server
-
-[score Discord](https://discord.gg/eh8ja2t92y)
-
 # Setup 
 ## Bittensor
 Get a Bittensor wallet
