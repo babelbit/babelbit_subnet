@@ -1,6 +1,6 @@
 # BabelBit
 
-## What is Babelbit
+## What is Babelbit?
 ### Background Theory
 Babelbit is a subnet which is developing low-latency speech-to-speech translation. We are working on the principle that as well as all the latency which is caused by speech encoding and synthesis, there have traditionally been hard limits on the latency of translating the language itself. That is, it is often not clear what a sentence means until you have the whole thing. This is especially true with languages where the word order rules put the verb at the end of a clause, like German, or sometimes the end of a sentence, in dialects like this example in Swiss German:
 
@@ -16,7 +16,7 @@ but is articulated something like:
 
 That is, **the listener has no idea what the sentence is about (breaking a lock) until the very last word**. 
 
-### Hypothesis
+### Our Hypothesis
 When native speakers listen to sentences with the verb at the end, in the vast majority of cases, they know what it will be. LLMs work in exactly the same way. In fact the fundamental mechanism by which they appear to exhibit intelligence is in predicting the best possible work to come next given the prior context. We are going to stretch this predictive power to its absolute limits, so that we can guess from the context what speaker is about to say, and start translating earlier. 
 
 ## Our First Challenge
