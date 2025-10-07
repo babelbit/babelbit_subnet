@@ -1,5 +1,49 @@
 # BabelBit
 
+## What is Babelbit
+### Background Theory
+Babelbit is a subnet which is developing low-latency speech-to-speech translation. We are working on the principle that as well as all the latency which is caused by speech encoding and synthesis, there have traditionally been hard limits on the latency of translating the language itself. That is, it is often not clear what a sentence means until you have the whole thing. This is especially true with languages where the word order rules put the verb at the end of a clause, like German, or sometimes the end of a sentence, in dialects like this example in Swiss German:
+
+*Ich ha s Schlos, wo ich, wie so oft, z'heftig, i mim Stress, wo wider mau passiert isch, verdräit ha, ufbroche.*
+
+which means:
+
+*I broke the lock, turning it too hard, in my usual panic*
+
+but is articulated something like:
+
+*I have, the lock, which I, as so often, too forcefully, in my panic, again, turned have, broken.*
+
+That is, **the listener has no idea what the sentence is about (breaking a lock) until the very last word**. 
+
+### Hypothesis
+When native speakers listen to sentences with the verb at the end, in the vast majority of cases, they know what it will be. LLMs work in exactly the same way. In fact the fundamental mechanism by which they appear to exhibit intelligence is in predicting the best possible work to come next given the prior context. We are going to stretch this predictive power to its absolute limits, so that we can guess from the context what speaker is about to say, and start translating earlier. 
+
+## Our First Challenge
+- it doesn't involve speech
+- it doesn't involve translation
+- **What????**
+
+Our first job it develop the prediction technique. So the challenge involves predicting not just the next word, but the entire phrase or sentence, and predicting it again, each time a word is revealed.
+
+What's more, **the best answer might not have all the words right**
+
+Remember that our predictions are part of a translation system. So if your script makes a prediction which *means* the same as the input, it can score very highly. Translating a sentence which means the same as what was said is just as good as tranlating the original, especially if it can be output much more quickly, e.g. 
+
+INPUT: Hi - how is all going with you?
+REVEALED PART OF THE INPUT: Hi - how....
+PREDICTION: Hi - how are you?
+
+Would it matter if we translated "how are you?" insteadn of "how is all going with you?"
+
+So first we must master the art of making predictions which are similar, whether that is *lexically* or *semantically* similar. If we can get a semantically adequate prediction *much* earlier than we could if we waited for the whole input, we can reduce translation latency by a huge degree. 
+
+You can improve our script; improve our model; replace the model with your own better one; retrain a new open-source model you just heard about. 
+
+Knock yourselves out. This is a creative field, in which the winners will be making a gigantic contribution to technology. 
+
+
+
 # Setup 
 ## Bittensor
 Get a Bittensor wallet
