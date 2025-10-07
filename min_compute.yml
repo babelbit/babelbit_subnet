@@ -1,0 +1,28 @@
+# min_compute.yml: Hardware specs for Babelbit Subnet (validator/miner setup)
+# Derived from repo requirements: CPU for orchestration/DB, GPU for ML tasks, RAM for model loading, storage for logs/models.
+# Usage: Adapt for your provider (e.g., AWS EC2 instance types like t3.medium for min, g4dn.xlarge for rec).
+
+specs:
+  minimum:
+    # Basic CPU-only setup for testing (e.g., AWS t3.medium, ~$0.04/hr)
+    cpu: 2  # Cores/vCPUs; sufficient for Docker orchestration and light validation
+    ram_gb: 4  # GB; handles basic env loading and small models
+    gpu: 0  # None; CPU fallback for inference (slow for training)
+    storage_gb: 50  # GB SSD; for OS, Docker images, small datasets, and Postgres DB
+    network: low  # <100 Mbps; fine for local/API calls
+    os: ubuntu-22.04  # Or similar; repo uses pip/uv for Python deps
+
+  recommended:
+    # GPU-enabled for efficient ML training/deployment (e.g., AWS g4dn.xlarge, ~$0.50/hr)
+    cpu: 4  # Cores/vCPUs; supports concurrent validators/miners and DB queries
+    ram_gb: 16  # GB; for loading larger Huggingface models and Chutes deployments
+    gpu: 1  # NVIDIA T4 or equivalent (16GB VRAM); accelerates training/inference
+    storage_gb: 200  # GB NVMe SSD; for models, logs, S3 caching, and expanded Postgres
+    network: high  # >1 Gbps; for Bittensor P2P, model pushes to Chutes/HF
+    os: ubuntu-22.04  # With NVIDIA drivers/CUDA for GPU
+
+notes:
+  - **Dependencies**: Ensure CUDA 11.8+ for GPU (if used); repo uses PyTorch implicitly via Chutes.
+  - **Scaling**: For high-traffic subnets, scale to 8+ CPU/32GB RAM/multi-GPU.
+  - **Cost Estimate**: Min ~$30/month on cloud; Rec ~$350/month (spot instances can reduce).
+  - **Source**: Inferred from repo's Docker, Postgres, and ML deployment needs (no explicit specs provided).
