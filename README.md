@@ -31,7 +31,9 @@ What's more, **the best answer might not have all the words right**
 Remember that our predictions are part of a translation system. So if your script makes a prediction which *means* the same as the input, it can score very highly. Translating a sentence which means the same as what was said is just as good as tranlating the original, especially if it can be output much more quickly, e.g. 
 
 INPUT: Hi - how is all going with you?
+
 REVEALED PART OF THE INPUT: Hi - how....
+
 PREDICTION: Hi - how are you?
 
 Would it matter if we translated "how are you?" insteadn of "how is all going with you?"
