@@ -40,7 +40,7 @@ def _hf_revision_accessible(model_id: str, revision: Optional[str]) -> bool:
     if not revision:
         return True
     try:
-        tok = os.getenv("HF_TOKEN")
+        tok = os.getenv("HUGGINGFACE_API_KEY")
         api = HfApi(token=tok) if tok else HfApi()
         api.repo_info(repo_id=model_id, repo_type="model", revision=revision)
         return True
