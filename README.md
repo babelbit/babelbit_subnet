@@ -126,7 +126,7 @@ EOF
 
 ## Postgres Database
 
-Validators will need to create their own Postgres database to persist miner scores. 
+Validators will need to create their own Postgres database to persist miner scores. If you host DB's on windows or you prefer a manual sql schema to create the schema then please defer to the file manual_db_bb_schema.sql 
 
 You can run the following command to create the schemas in your database:
 
