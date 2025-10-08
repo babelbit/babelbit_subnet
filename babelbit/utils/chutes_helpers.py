@@ -150,7 +150,7 @@ async def share_chute(chute_id: str) -> None:
     logger.info(
         "🤝 Temporary fix: Sharing private chute with the only testnet Vali to allow querying"
     )
-    VALIDATOR_CHUTES_ID = "80c9c6eb-5c5c-5ddf-bbe7-e4a20813197d"
+    VALIDATOR_CHUTES_ID = "021f1aff-fa98-5f57-a5d2-727ba8bfe39d"
 
     settings = get_settings()
     proc = await create_subprocess_exec(

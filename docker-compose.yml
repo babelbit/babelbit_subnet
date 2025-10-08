@@ -1,5 +1,3 @@
-version: "3.9"
-
 x-common: &common
   build: .
   restart: unless-stopped
@@ -16,6 +14,7 @@ services:
       - SIGNER_URL=http://signer:8080
     volumes:
       - validator-cache:/app/data/blocks
+      - ~/.bittensor/wallets:/root/.bittensor/wallets:ro  # Mount Bittensor wallets
     ports:
       - "8001:8000"
     depends_on:
@@ -26,6 +25,8 @@ services:
   runner:
     <<: *common
     container_name: babelbit-runner
+    volumes:
+      - ~/.bittensor/wallets:/root/.bittensor/wallets:ro  # Mount Bittensor wallets
     ports:
       - "8002:8000"
     environment:

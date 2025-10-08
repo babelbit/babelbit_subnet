@@ -8,14 +8,16 @@ def init_chute(username: str, name: str) -> Chute:
         .from_base("parachutes/python:3.12")
         .run_command("pip install --upgrade setuptools wheel")
         .run_command(
-            "pip install pillow==10.0.1 huggingface_hub==0.19.4 'torch<2.6' transformers pydantic"
+            "pip install huggingface_hub==0.19.4 torch torchvision torchaudio")
+        .run_command(
+            "pip install transformers pydantic chutes"
         )
         .set_workdir("/app")
     )
 
     node_selector = NodeSelector(
         gpu_count=1,
-        min_vram_gb_per_gpu=16,
+        min_vram_gb_per_gpu=16,  # Minimum required by Chutes platform
     )
     return Chute(
         username=username,
