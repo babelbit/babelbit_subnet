@@ -112,7 +112,7 @@ def get_settings() -> Settings:
         ).expanduser().resolve(),
 
         # Babelbit core
-        BABELBIT_NETUID=int(getenv("BABELBIT_NETUID", "44")),
+        BABELBIT_NETUID=int(getenv("BABELBIT_NETUID", "59")),
         BABELBIT_TEMPO=int(getenv("BABELBIT_TEMPO", "360")),
         BABELBIT_CACHE_DIR=Path(getenv("BABELBIT_CACHE_DIR", "~/.babelbit")).expanduser().resolve(),
         BABELBIT_VERSION=getenv("BABELBIT_VERSION", __version__),
