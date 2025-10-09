@@ -36,7 +36,7 @@ logger = getLogger(__name__)
     help="Increase verbosity (-v INFO, -vv DEBUG)",
 )
 def cli(verbosity: int):
-    """Score Vision CLI"""
+    """Babelbit CLI"""
     settings = get_settings()
     basicConfig(
         level=DEBUG if verbosity == 2 else INFO if verbosity == 1 else WARNING,
