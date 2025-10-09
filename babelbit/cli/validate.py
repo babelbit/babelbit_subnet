@@ -21,6 +21,7 @@ from babelbit.utils.prometheus import (
 )
 from babelbit.utils.settings import get_settings
 from babelbit.utils.db_pool import db_pool, _iter_scores_from_db
+from babelbit.utils.utterance_auth import init_utterance_auth, authenticate_utterance_engine
 
 logger = logging.getLogger("babelbit.validator")
 
@@ -38,6 +39,16 @@ async def _validate_main(tail: int, alpha: float, m_min: int, tempo: int):
         settings.BABELBIT_NETUID,
         f"{settings.BITTENSOR_WALLET_HOT}",
     )
+
+    # Initialize utterance engine authentication
+    utterance_engine_url = os.getenv("BB_UTTERANCE_ENGINE_URL", "http://localhost:8000")
+    if utterance_engine_url:
+        try:
+            init_utterance_auth(utterance_engine_url, settings.BITTENSOR_WALLET_COLD, settings.BITTENSOR_WALLET_HOT)
+            await authenticate_utterance_engine()
+            logger.info("✅ Utterance engine authentication successful")
+        except Exception as e:
+            logger.warning(f"Failed to authenticate with utterance engine: {e}")
 
     NETUID = settings.BABELBIT_NETUID
 
