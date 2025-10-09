@@ -6,7 +6,7 @@ from babelbit.utils.settings import get_settings
 
 logger = logging.getLogger("sv-signer")
 
-NETUID = int(os.getenv("BABELBIT_NETUID", "44"))
+NETUID = int(os.getenv("BABELBIT_NETUID", "59"))
 
 
 async def get_subtensor():
