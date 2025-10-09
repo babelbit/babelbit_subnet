@@ -185,6 +185,12 @@ sv -vv signer
 
 # Miners
 
+**IMPORTANT: Please follow the instructions below carefully to ensure the proper commitment of your chute.**
+
+<u>Note 1</u>: Using the CLI will help create the proper Chutes slug for your image and therefore avoid any issue during validation. Chutes slugs should contain the substring 'Babelbit'. Use the chute CLI directly at your own risk.
+
+<u>Note 2</u>: You need to register your miner with the **same hotkey** linked to your Chutes account. This ensures that the validators are granted access to your Chute.
+
 0. Install Babelbit CLI (uv)
 
 ```bash
