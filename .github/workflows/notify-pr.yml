@@ -1,0 +1,25 @@
+name: Slack Notification on PR
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Slack Notification
+        uses: rtCamp/action-slack-notify@v2.2.0
+        env:
+          SLACK_CHANNEL: '#github-pr'
+          SLACK_COLOR: ${{ github.event.action == 'closed' && github.event.pull_request.merged == true && '#800080' || '#FFFF00' }}
+          SLACK_ICON_EMOJI: ':pull_request:'
+          SLACK_TITLE: ${{ github.event.action == 'closed' && github.event.pull_request.merged == true && format('PR Merged:{0}', github.event.pull_request.title) || format('PR {0}:{1}', github.event.action, github.event.pull_request.title) }}
+          SLACK_USERNAME: 'GitHub Bot'
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          SLACK_TEXT: |
+            *Event:* ${{ github.event.action == 'closed' && github.event.pull_request.merged == true && 'merged' || github.event.action }}
+            *Repo:* ${{ github.repository }}
+            *PR Number:* #${{ github.event.number }}
+            *Title:* ${{ github.event.pull_request.title || 'N/A' }}
+            *Author:* ${{ github.event.pull_request.user.login || 'Unknown' }}
+            *Branch:* ${{ github.event.pull_request.head.ref || 'Unknown' }}
+            [View PR](https://github.com/${{ github.repository }}/pull/${{ github.event.number }})
