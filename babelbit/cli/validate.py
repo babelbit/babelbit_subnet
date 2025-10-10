@@ -169,7 +169,7 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25):  
             challenge_scores = await _iter_scores_for_challenge(current_challenge_uid)
             if not challenge_scores:
                 logger.warning(f"No scores found for current challenge {current_challenge_uid} → default weight uid 248")
-                return [0], [1.0]
+                return [248], [1.0]
             logger.info(f"Found {len(challenge_scores)} miners with scores for current challenge {current_challenge_uid}")
             # Convert to the expected format for later processing
             current_rows = [(hk, score, current_challenge_uid) for hk, score in challenge_scores]
@@ -179,7 +179,7 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25):  
             db_rows = await _iter_scores_from_db(limit=tail)
             if not db_rows:
                 logger.warning("No DB scoring data → default weight uid 248")
-                return [0], [1.0]
+                return [248], [1.0]
             
             # Parse and find latest challenge
             enriched = []
@@ -202,7 +202,7 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25):  
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("DB init/fetch failure in get_weights: %s", e)
         logger.warning("No DB scoring data → default weight uid 248")
-        return [0], [1.0]
+        return [248], [1.0]
 
     # Latest score per miner (first row is most recent due to DESC ordering)
     latest_per_hk: dict[str, float] = {}
@@ -214,7 +214,7 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25):  
 
     if not latest_per_hk:
         logger.warning("No eligible miner scores for latest challenge → default uid 248")
-        return [0], [1.0]
+        return [248], [1.0]
 
     winner_hk = max(latest_per_hk.keys(), key=lambda k: latest_per_hk[k])
     winner_uid = hk_to_uid.get(winner_hk, 0)
