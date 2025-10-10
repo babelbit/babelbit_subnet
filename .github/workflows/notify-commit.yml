@@ -1,0 +1,24 @@
+name: Slack Notification on Commit
+on:
+  push:
+    branches: ['**']  # Check handling for commits on the different slack channels
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Slack Notification
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_CHANNEL: ${{ contains(github.ref_name, 'main') && '#github-alerts' || '#github-pr' }} #check channel handling
+          SLACK_COLOR: '#00FF00'  # Double check this is green
+          SLACK_ICON_EMOJI: ':git:'
+          SLACK_MESSAGE: 'New commit has just been pushed!'
+          SLACK_TITLE: 'Repo babelbit_subnet - Commit Alert'
+          SLACK_USERNAME: 'GitHub Bot'
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          SLACK_TEXT: |
+            *Repo:* ${{ github.repository }}
+            *Branch:* ${{ github.ref_name }}
+            *Commit:* ${{ github.sha }} by ${{ github.actor }}
+            *Message:* ${{ github.event.head_commit.message }}
+            [View Commit](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
