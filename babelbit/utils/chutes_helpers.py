@@ -148,45 +148,63 @@ async def get_chute_slug_and_id(revision: str) -> tuple[str, str | None]:
 
 async def share_chute(chute_id: str) -> None:
     logger.info(
-        "🤝 Temporary fix: Sharing private chute with the only testnet Vali to allow querying"
+        "🤝 Temporary fix: Sharing chute with validators (one at a time)"
     )
-    VALIDATOR_CHUTES_ID = "021f1aff-fa98-5f57-a5d2-727ba8bfe39d"
+    VALIDATOR_CHUTES_IDS = [
+        "021f1aff-fa98-5f57-a5d2-727ba8bfe39d",
+        "WildSageLabs",
+        "rizzo2",
+        "yumaValidator",
+        "tensora"
+    ]
 
     settings = get_settings()
-    proc = await create_subprocess_exec(
-        "chutes",
-        "share",
-        "--chute-id",
-        chute_id,
-        "--user-id",
-        VALIDATOR_CHUTES_ID,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.PIPE,
-        env={
-            **environ,
-            "CHUTES_API_KEY": settings.CHUTES_API_KEY.get_secret_value(),
-        },
-    )
-    if proc.stdin:
-        proc.stdin.write(b"y\n")  # auto-confirm
-        await proc.stdin.drain()
-        proc.stdin.close()
+    
+    # Share with each validator individually since chutes can only be shared with one user at a time
+    for validator_id in VALIDATOR_CHUTES_IDS:
+        logger.info(f"Sharing chute {chute_id} with validator: {validator_id}")
+        
+        proc = await create_subprocess_exec(
+            "chutes",
+            "share",
+            "--chute-id",
+            chute_id,
+            "--user-id",
+            validator_id,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.PIPE,
+            env={
+                **environ,
+                "CHUTES_API_KEY": settings.CHUTES_API_KEY.get_secret_value(),
+            },
+        )
+        if proc.stdin:
+            proc.stdin.write(b"y\n")  # auto-confirm
+            await proc.stdin.drain()
+            proc.stdin.close()
 
-    # Read and log output line by line as it appears
-    assert proc.stdout is not None
-    full_output = []
-    while True:
-        line = await proc.stdout.readline()
-        if not line:
-            break
-        decoded_line = line.decode(errors="ignore").rstrip()
-        full_output.append(decoded_line)
-        logger.info(f"[chutes share] {decoded_line}")
+        # Read and log output line by line as it appears
+        assert proc.stdout is not None
+        full_output = []
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            decoded_line = line.decode(errors="ignore").rstrip()
+            full_output.append(decoded_line)
+            logger.info(f"[chutes share {validator_id}] {decoded_line}")
 
-    returncode = await proc.wait()
-    if returncode != 0:
-        raise ValueError("Chutes sharing failed.")
+        returncode = await proc.wait()
+        if returncode != 0:
+            logger.warning(f"Failed to share chute with {validator_id} (exit code: {returncode})")
+            # Log the failure but continue with other validators
+            if full_output:
+                logger.error(f"Last 10 lines: {chr(10).join(full_output[-10:])}")
+        else:
+            logger.info(f"✅ Successfully shared chute with {validator_id}")
+    
+    logger.info(f"Completed sharing chute {chute_id} with all validators")
 
 
 async def build_chute(path: Path) -> None:

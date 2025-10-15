@@ -163,6 +163,9 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25):  
     try:
         await db_pool.init()
         
+        # Track which data source we used for logging
+        data_source = None
+        
         if current_challenge_uid:
             # Use efficient challenge-specific query
             from babelbit.utils.db_pool import _iter_scores_for_challenge
@@ -173,6 +176,7 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25):  
             logger.info(f"Found {len(challenge_scores)} miners with scores for current challenge {current_challenge_uid}")
             # Convert to the expected format for later processing
             current_rows = [(hk, score, current_challenge_uid) for hk, score in challenge_scores]
+            data_source = "current_challenge"
         else:
             # Fallback: fetch recent rows and use most recent challenge
             logger.warning("No current challenge ID available, falling back to most recent challenge in DB")
@@ -198,6 +202,7 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25):  
                 break
             current_rows = [r for r in enriched if r[2] == latest_challenge]
             logger.info(f"Using fallback challenge {latest_challenge} with {len(current_rows)} scores")
+            data_source = "fallback_db"
             
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("DB init/fetch failure in get_weights: %s", e)
@@ -236,7 +241,7 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25):  
         winner_uid,
         latest_per_hk[winner_hk],
         1,
-        "db" if db_rows else "empty",
+        data_source or "unknown",
     )
     return uids, weights
 
