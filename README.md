@@ -211,10 +211,7 @@ Register your miner to BabelBit (SNXX).
 btcli subnet register --wallet.name <your cold> --wallet.hotkey <your hot>
 ```
 
-2. Upgrade Chutes to a Developer-Enable Account
-Miners need a chutes developer account ( `chutes.ai` ). 
-
-IMPORTANT: you require a ***developer enabled account*** on Chutes to mine. Normal API keys cannot deploy chutes right now.
+2. Register a chute user via the CLI with the same hotkey you registered on Babelbit with, in order to deploy chutes for Babelbit with "babelbit" in the chute name.
 
 3. Train a model
 ```bash
