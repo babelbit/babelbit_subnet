@@ -160,6 +160,18 @@ async def predict_with_utterance_engine(
                             prediction_text = result.utterance.prediction
                             logger.debug(f"Chute predicted: '{prediction_text}' for prefix '{prefix_text}'")
                             
+                            # Save this prediction step to dialogues
+                            step_utterance = BBPredictedUtterance(
+                                index=session_id,
+                                step=len(current_utterance_tokens) - 1,  # Step is 0-indexed
+                                prefix=prefix_text,
+                                prediction=prediction_text,
+                                context=context_memory,
+                                done=False,  # Not done yet, more tokens may come
+                            )
+                            if current_dialogue_uid:
+                                dialogues[current_dialogue_uid].append(step_utterance)
+                            
                             # Log prediction event
                             if challenge_logger:
                                 challenge_logger.log_predicted_event(
@@ -176,34 +188,30 @@ async def predict_with_utterance_engine(
                         logger.error(f"Error calling chute: {e}")
                         
             elif current_token == "EOF":
-                # End of utterance - create utterance object
-                if current_utterance_tokens:
-                    utterance = BBPredictedUtterance(
-                        index=session_id,
-                        step=current_utterance_index,
-                        prefix=" ".join(current_utterance_tokens[:-1]) if len(current_utterance_tokens) > 1 else "",
-                        prediction=current_utterance_tokens[-1] if current_utterance_tokens else "",
-                        ground_truth=" ".join(current_utterance_tokens),
-                        done=True,
-                    )
+                # End of utterance - mark the last step with ground truth and done=True
+                if current_utterance_tokens and current_dialogue_uid:
+                    ground_truth_text = " ".join(current_utterance_tokens)
                     
-                    if current_dialogue_uid:
-                        dialogues[current_dialogue_uid].append(utterance)
-                        
-                        # Update context with completed utterance, separated by EOF
-                        utterance_text = " ".join(current_utterance_tokens)
-                        if context_memory:
-                            context_memory += f" EOF {utterance_text}"
-                        else:
-                            context_memory = utterance_text
+                    # Update the last prediction step to include ground truth and done=True
+                    if dialogues.get(current_dialogue_uid):
+                        # Find all steps for this utterance and mark the last one as done
+                        last_step = dialogues[current_dialogue_uid][-1]
+                        last_step.ground_truth = ground_truth_text
+                        last_step.done = True
                         
                         # Log utterance completion event
                         if challenge_logger:
                             challenge_logger.log_utterance_complete_event(
                                 utterance_index=current_utterance_index,
-                                ground_truth=utterance.ground_truth or "",
-                                final_prediction=utterance.prediction or ""
+                                ground_truth=ground_truth_text,
+                                final_prediction=last_step.prediction or ""
                             )
+                    
+                    # Update context with completed utterance, separated by EOF
+                    if context_memory:
+                        context_memory += f" EOF {ground_truth_text}"
+                    else:
+                        context_memory = ground_truth_text
                     
                     logger.info(f"Completed utterance {current_utterance_index} with {len(current_utterance_tokens)} tokens")
                 

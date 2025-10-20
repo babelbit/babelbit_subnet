@@ -66,7 +66,7 @@ def get_chute_name(hf_revision: str) -> str:
     settings = get_settings()
     nickname = generate_nickname(key=hf_revision)
     logger.info(f"Hf Revision ({hf_revision}) -> Nickname ({nickname})")
-    return f"{settings.HUGGINGFACE_USERNAME.replace('/','-')}-{nickname}".lower()
+    return f"{settings.HUGGINGFACE_USERNAME.replace('/','-')}-babelbit-{nickname}".lower()
 
 
 def guess_chute_slug(hf_revision: str) -> str:

@@ -14,6 +14,7 @@ jobs:
           SLACK_ICON_EMOJI: ':git:'
           SLACK_MESSAGE: 'New commit has just been pushed!'
           SLACK_TITLE: 'Public repo babelbit_subnet - Commit Alert'
+
           SLACK_USERNAME: 'GitHub Bot'
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
           SLACK_TEXT: |

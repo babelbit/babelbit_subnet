@@ -287,6 +287,8 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
                                             "scoring_staging_id": scoring_staging_id,
                                             "challenge_uid": challenge_uid,
                                             "dialogue_uid": dialogue_uid,
+                                            "miner_uid": getattr(m, 'uid', None),
+                                            "miner_hotkey": getattr(m, 'hotkey', None),
                                             "utterance_number": utt.get("utterance_number"),
                                             "ground_truth": utt.get("ground_truth"),
                                             "best_step": utt.get("best_step"),
