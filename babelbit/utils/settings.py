@@ -100,7 +100,7 @@ def get_settings() -> Settings:
         CHUTES_API_KEY=SecretStr(getenv("CHUTES_API_KEY", "")),
         CHUTES_USERNAME=getenv("CHUTES_USERNAME", ""),
         CHUTES_MINER_PREDICT_ENDPOINT=getenv("CHUTES_MINER_PREDICT_ENDPOINT", "predict"),
-        CHUTES_MINER_BASE_URL_TEMPLATE=getenv("CHUTES_MINER_BASE_URL_TEMPLATE", "http://{slug}.chutes.ai"),
+        CHUTES_MINER_BASE_URL_TEMPLATE=getenv("CHUTES_MINER_BASE_URL_TEMPLATE", "https://{slug}.chutes.ai"),
         CHUTES_API_N_RETRIES=int(getenv("CHUTES_API_N_RETRIES", "0")),
         CHUTES_TIMEOUT_SEC=int(getenv("CHUTES_TIMEOUT_SEC", "10")),
         # Template paths - resolve to absolute to avoid duplication
