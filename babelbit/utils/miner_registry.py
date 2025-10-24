@@ -96,13 +96,17 @@ async def fetch_chute_info(chute_id: str) -> Optional[dict]:
 
 
 # ---------------------------- Miner registry main ----------------------------- #
-async def get_miners_from_registry(netuid: int) -> Dict[int, Miner]:
+async def get_miners_from_registry(netuid: int, subtensor=None) -> Dict[int, Miner]:
     """
     Reads on-chain commitments, verifies HF gating/revision and Chutes slug,
     and returns at most one miner per model (earliest block wins).
+    
+    Args:
+        netuid: The subnet ID
+        subtensor: Optional existing subtensor connection to reuse
     """
     settings = get_settings()
-    st = await get_subtensor()
+    st = subtensor if subtensor is not None else await get_subtensor()
     meta = await st.metagraph(netuid)
     commits = await st.get_all_revealed_commitments(netuid)
 

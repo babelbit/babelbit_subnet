@@ -5,6 +5,7 @@ from inspect import iscoroutinefunction
 from hashlib import sha256
 from json import dumps
 from random import shuffle, randint
+import asyncio
 
 from aiohttp import ClientResponseError
 
@@ -16,6 +17,55 @@ from babelbit.utils.utterance_auth import get_auth_headers
 from babelbit.chute_template.schemas import BBPredictedUtterance
 
 logger = getLogger(__name__)
+
+
+async def retry_with_exponential_backoff(
+    func: Callable,
+    *args,
+    max_retries: int = 3,
+    initial_delay: float = 1.0,
+    backoff_factor: float = 2.0,
+    **kwargs
+):
+    """
+    Retry an async function with exponential backoff.
+    
+    Args:
+        func: Async function to retry
+        max_retries: Maximum number of retry attempts (default: 3)
+        initial_delay: Initial delay in seconds (default: 1.0)
+        backoff_factor: Multiplier for each retry (default: 2.0)
+        *args, **kwargs: Arguments to pass to func
+        
+    Returns:
+        Result of successful function call
+        
+    Raises:
+        Exception: The last exception if all retries fail
+    """
+    last_exception = None
+    delay = initial_delay
+    
+    for attempt in range(max_retries):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            last_exception = e
+            if attempt < max_retries - 1:
+                logger.warning(
+                    f"Attempt {attempt + 1}/{max_retries} failed for {func.__name__}: {type(e).__name__}: {e}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                await asyncio.sleep(delay)
+                delay *= backoff_factor
+            else:
+                logger.error(
+                    f"All {max_retries} attempts failed for {func.__name__}: {type(e).__name__}: {e}"
+                )
+    
+    if last_exception:
+        raise last_exception
+    raise RuntimeError(f"Retry failed without exception for {func.__name__}")
 
 
 class BabelbitUtteranceError(Exception):
@@ -43,10 +93,10 @@ async def get_current_challenge_uid(utterance_engine_url: str) -> Optional[str]:
     Raises:
         UtteranceEngineError: If the API interaction fails
     """
-    session = await get_async_client()
-    headers = await get_auth_headers()
-    
-    try:
+    async def _get_challenge():
+        session = await get_async_client()
+        headers = await get_auth_headers()
+        
         async with session.get(f"{utterance_engine_url}/start", headers=headers) as response:
             if response.status != 200:
                 raise UtteranceEngineError(f"Failed to get challenge ID: HTTP {response.status}")
@@ -56,9 +106,11 @@ async def get_current_challenge_uid(utterance_engine_url: str) -> Optional[str]:
             
             logger.info(f"Current challenge ID: {challenge_uid}")
             return challenge_uid
-            
+    
+    try:
+        return await retry_with_exponential_backoff(_get_challenge, max_retries=3, initial_delay=1.0)
     except Exception as e:
-        logger.error(f"Error getting challenge ID: {e}")
+        logger.error(f"Error getting challenge ID after retries: {e}")
         raise UtteranceEngineError(f"Failed to get challenge ID: {e}")
 
 
@@ -66,7 +118,8 @@ async def predict_with_utterance_engine(
     utterance_engine_url: str,
     chute_slug: Optional[str] = None,
     challenge_logger: Optional[Any] = None,
-    timeout: float = 10.0
+    timeout: float = 10.0,
+    max_prediction_errors: int = 5
 ) -> Dict[str, List[BBPredictedUtterance]]:
     """
     Interact with the utterance engine API to get complete dialogues using a chute for predictions.
@@ -75,44 +128,72 @@ async def predict_with_utterance_engine(
         utterance_engine_url: Base URL of the utterance engine (e.g., "http://localhost:8000")
         chute_slug: Optional chute slug to use for predictions. If None, uses empty predictions.
         challenge_logger: Optional logger for recording step-by-step interaction events
+        timeout: Timeout for chute predictions in seconds
+        max_prediction_errors: Maximum consecutive prediction errors before interrupting (default: 5)
     
     Returns:
         Dict mapping dialogue_uid to List of BBPredictedUtterance objects for each dialogue
     
     Raises:
         UtteranceEngineError: If the API interaction fails
+        BabelbitUtteranceError: If too many consecutive prediction errors occur
     """
     from babelbit.utils.predict_engine import call_miner_model_on_chutes
     
     session = await get_async_client()
     headers = await get_auth_headers()
     dialogues = {}  # dialogue_uid -> List[BBPredictedUtterance]
+    consecutive_prediction_errors = 0  # Track consecutive prediction failures
+    
+    async def _call_start():
+        """Helper to call /start endpoint with retry logic"""
+        async with session.get(f"{utterance_engine_url}/start", headers=headers) as response:
+            if response.status != 200:
+                raise UtteranceEngineError(f"Failed to start session: HTTP {response.status}")
+            return await response.json()
+    
+    async def _call_next(session_id: str, prediction: str):
+        """Helper to call /next endpoint with retry logic"""
+        next_payload = {
+            "session_id": session_id,
+            "prediction": prediction
+        }
+        
+        async with session.post(
+            f"{utterance_engine_url}/next", 
+            json=next_payload,
+            headers=headers
+        ) as next_response:
+            if next_response.status != 200:
+                error_data = await next_response.json()
+                if error_data.get("error") == "invalid or missing session_id":
+                    raise UtteranceEngineError(f"Invalid session: {session_id}")
+                else:
+                    raise UtteranceEngineError(f"Failed to get next token: HTTP {next_response.status}")
+            
+            return await next_response.json()
     
     try:
         session_complete = False
         current_dialogue_uid = None
         context_memory = ""  # Accumulates full dialogue history
         
-        # Start the session (which can contain multiple dialogues)
-        async with session.get(f"{utterance_engine_url}/start", headers=headers) as response:
-            if response.status != 200:
-                raise UtteranceEngineError(f"Failed to start session: HTTP {response.status}")
-            
-            start_data = await response.json()
-            
-            # Check if session is immediately done (no dialogues)
-            if start_data.get("done", False):
-                logger.info("Session immediately complete - no dialogues")
-                return dialogues
-            
-            # Get first token and session info
-            session_id = start_data["session_id"]
-            first_token = start_data.get("word", start_data.get("token"))
-            utterance_index = start_data.get("utterance_index", 0)
-            dialogue_uid = start_data.get("dialogue_uid")
-            challenge_uid = start_data.get("challenge_uid")
-            
-            logger.info(f"Started session {session_id}, first dialogue {dialogue_uid}")
+        # Start the session (which can contain multiple dialogues) with retry
+        start_data = await retry_with_exponential_backoff(_call_start, max_retries=3, initial_delay=1.0)
+        
+        # Check if session is immediately done (no dialogues)
+        if start_data.get("done", False):
+            logger.info("Session immediately complete - no dialogues")
+            return dialogues
+        
+        # Get first token and session info
+        session_id = start_data["session_id"]
+        first_token = start_data.get("word", start_data.get("token"))
+        utterance_index = start_data.get("utterance_index", 0)
+        dialogue_uid = start_data.get("dialogue_uid")
+        challenge_uid = start_data.get("challenge_uid")
+        
+        logger.info(f"Started session {session_id}, first dialogue {dialogue_uid}")
         
         # Process the first token and continue until session is complete
         current_token = first_token
@@ -158,6 +239,7 @@ async def predict_with_utterance_engine(
                         
                         if result.success and result.utterance:
                             prediction_text = result.utterance.prediction
+                            consecutive_prediction_errors = 0  # Reset error counter on success
                             logger.debug(f"Chute predicted: '{prediction_text}' for prefix '{prefix_text}'")
                             
                             # Save this prediction step to dialogues
@@ -182,10 +264,37 @@ async def predict_with_utterance_engine(
                                     context_used=context_memory.split(" EOF ") if context_memory else []
                                 )
                         else:
-                            logger.warning(f"Chute prediction failed: {result.error}")
+                            consecutive_prediction_errors += 1
+                            logger.warning(
+                                f"Chute prediction failed - {consecutive_prediction_errors} consecutive errors "
+                                f"(max: {max_prediction_errors}): {result.error}"
+                            )
                             
+                            if consecutive_prediction_errors >= max_prediction_errors:
+                                error_msg = (
+                                    f"Interrupting miner {chute_slug}: {max_prediction_errors} consecutive prediction errors. "
+                                    f"Last error: {result.error}"
+                                )
+                                logger.error(error_msg)
+                                raise BabelbitUtteranceError(error_msg)
+                            
+                    except BabelbitUtteranceError:
+                        # Re-raise interruption errors
+                        raise
                     except Exception as e:
-                        logger.error(f"Error calling chute: {e}")
+                        consecutive_prediction_errors += 1
+                        logger.error(
+                            f"Error calling chute - {consecutive_prediction_errors} consecutive errors "
+                            f"(max: {max_prediction_errors}): {e}"
+                        )
+                        
+                        if consecutive_prediction_errors >= max_prediction_errors:
+                            error_msg = (
+                                f"Interrupting miner {chute_slug}: {max_prediction_errors} consecutive prediction errors. "
+                                f"Last error: {e}"
+                            )
+                            logger.error(error_msg)
+                            raise BabelbitUtteranceError(error_msg)
                         
             elif current_token == "EOF":
                 # End of utterance - mark the last step with ground truth and done=True
@@ -224,49 +333,39 @@ async def predict_with_utterance_engine(
                 logger.info(f"Completed dialogue {current_dialogue_uid}")
                 current_utterance_index = 0  # Reset for next dialogue
             
-            # Get next token
-            next_payload = {
-                "session_id": session_id,
-                "prediction": prediction_text if 'prediction_text' in locals() else ""
-            }
+            # Get next token with retry
+            prediction = prediction_text if 'prediction_text' in locals() else ""
+            next_data = await retry_with_exponential_backoff(
+                _call_next, 
+                session_id, 
+                prediction,
+                max_retries=3, 
+                initial_delay=1.0
+            )
             
-            async with session.post(
-                f"{utterance_engine_url}/next", 
-                json=next_payload,
-                headers=headers
-            ) as next_response:
-                if next_response.status != 200:
-                    error_data = await next_response.json()
-                    if error_data.get("error") == "invalid or missing session_id":
-                        raise UtteranceEngineError(f"Invalid session: {session_id}")
-                    else:
-                        raise UtteranceEngineError(f"Failed to get next token: HTTP {next_response.status}")
+            # Check if session is complete
+            session_complete = next_data.get("done", False)
+            if session_complete:
+                logger.info("Session completed")
+                break
+            
+            # Update current token and metadata
+            current_token = next_data.get("word", next_data.get("token"))
+            dialogue_uid = next_data.get("dialogue_uid", dialogue_uid)
+            utterance_index = next_data.get("utterance_index", utterance_index)
+            current_utterance_index = utterance_index
+            
+            # Log revealed event
+            if challenge_logger and current_token:
+                is_done = current_token in ("EOF", "EOF EOF")
+                revealed_token = None if current_token in ("EOF", "EOF EOF") else current_token
                 
-                next_data = await next_response.json()
-                
-                # Check if session is complete
-                session_complete = next_data.get("done", False)
-                if session_complete:
-                    logger.info("Session completed")
-                    break
-                
-                # Update current token and metadata
-                current_token = next_data.get("word", next_data.get("token"))
-                dialogue_uid = next_data.get("dialogue_uid", dialogue_uid)
-                utterance_index = next_data.get("utterance_index", utterance_index)
-                current_utterance_index = utterance_index
-                
-                # Log revealed event
-                if challenge_logger and current_token:
-                    is_done = current_token in ("EOF", "EOF EOF")
-                    revealed_token = None if current_token in ("EOF", "EOF EOF") else current_token
-                    
-                    challenge_logger.log_revealed_event(
-                        utterance_index=current_utterance_index,
-                        step=len(current_utterance_tokens),
-                        revealed_next=revealed_token,
-                        done=is_done
-                    )
+                challenge_logger.log_revealed_event(
+                    utterance_index=current_utterance_index,
+                    step=len(current_utterance_tokens),
+                    revealed_next=revealed_token,
+                    done=is_done
+                )
                 
     except Exception as e:
         logger.error(f"Error during utterance engine interaction: {e}")

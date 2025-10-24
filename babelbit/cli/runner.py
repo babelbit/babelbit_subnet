@@ -11,17 +11,17 @@ import time
 
 from babelbit.utils.s3_manager import S3Manager
 from babelbit.utils.settings import get_settings
-# from babelbit.utils.challenges import get_challenge_from_scorevision
-from babelbit.utils.predict_utterances import get_current_challenge_uid, predict_with_utterance_engine
+
+from babelbit.utils.predict_utterances import (
+    get_current_challenge_uid, 
+    predict_with_utterance_engine,
+    BabelbitUtteranceError
+)
 from babelbit.utils.utterance_auth import init_utterance_auth, authenticate_utterance_engine
-# from babelbit.utils.evaluate import evaluate_using_vlms, post_vlm_ranking
-# from babelbit.utils.cloudflare_helpers import emit_shard
 from babelbit.utils.async_clients import close_http_clients
-# from babelbit.vlm_pipeline.vlm_annotator import (
-#     generate_annotations_for_select_frames,
-# )
+
 from babelbit.utils.miner_registry import get_miners_from_registry, Miner
-from babelbit.utils.bittensor_helpers import get_subtensor
+from babelbit.utils.bittensor_helpers import get_subtensor, reset_subtensor
 from babelbit.chute_template.schemas import BBPredictedUtterance
 from babelbit.utils.file_handling import (
     get_processed_miners_for_challenge,
@@ -73,7 +73,7 @@ def group_steps_into_utterances(utterance_steps: List[BBPredictedUtterance]) -> 
     return complete_utterances
 
 
-async def runner(slug: str | None = None, utterance_engine_url: str | None = None, output_dir: Optional[str] = None) -> None:
+async def runner(slug: str | None = None, utterance_engine_url: str | None = None, output_dir: Optional[str] = None, subtensor=None) -> None:
     settings = get_settings()
     NETUID = settings.BABELBIT_NETUID
     MAX_MINERS = int(os.getenv("BB_MAX_MINERS_PER_RUN", "60"))
@@ -140,7 +140,7 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
         return
 
     try:
-        miners = await get_miners_from_registry(NETUID)
+        miners = await get_miners_from_registry(NETUID, subtensor=subtensor)
         logger.info(f"Found {len(miners)} eligible miners from registry: {list(miners.keys())}")
         if not miners:
             logger.warning("No eligible miners found on-chain.")
@@ -167,6 +167,7 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
 
         for m in miner_list:
             try:
+                logger.info(f"Running miner {m.slug} (uid: {getattr(m, 'uid', None)}, hotkey: {getattr(m, 'hotkey', None)}) for challenge {challenge_uid}")
                 # No per-miner ChallengeLogger usage when just emitting raw logs
                 challenge_logger = None
                 
@@ -338,18 +339,28 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
                         logger.warning("Failed to save challenge summary for miner %s: %s", getattr(m,'uid', '?'), e)
 
             except Exception as e:
-                logger.warning(
-                    "Miner uid=%s slug=%s failed: %s",
-                    getattr(m, "uid", "?"),
-                    getattr(m, "slug", "?"),
-                    e,
-                )
+                error_type = type(e).__name__
+                if error_type == "BabelbitUtteranceError":
+                    # Miner interrupted due to too many prediction errors
+                    logger.error(
+                        "Miner uid=%s slug=%s interrupted: %s",
+                        getattr(m, "uid", "?"),
+                        getattr(m, "slug", "?"),
+                        e,
+                    )
+                else:
+                    logger.warning(
+                        "Miner uid=%s slug=%s failed: %s",
+                        getattr(m, "uid", "?"),
+                        getattr(m, "slug", "?"),
+                        e,
+                    )
                 # Close challenge logger if it exists
                 if 'challenge_logger' in locals() and challenge_logger:
                     challenge_logger.close()
                 continue
     except Exception as e:
-        logger.error(e)
+        logger.error(f"Runner failed: {type(e).__name__}: {e}", exc_info=True)
     finally:
         close_http_clients()
     # Outputs persisted separately: raw logs in logs_dir, scores in scores_dir
@@ -359,29 +370,109 @@ async def runner_loop():
     """Runs `runner()` every N blocks (default: 300)."""
     settings = get_settings()
     TEMPO = int(os.getenv("BABELBIT_TEMPO", "300"))
+    MAX_SUBTENSOR_RETRIES = int(os.getenv("BABELBIT_MAX_SUBTENSOR_RETRIES", "5"))
 
     st = None
     last_block = -1
+    last_successful_run = 0
+    consecutive_failures = 0
 
     while True:
         try:
             if st is None:
-                st = await get_subtensor()
+                logger.info(f"[RunnerLoop] Attempting to connect to subtensor (attempt {consecutive_failures + 1}/{MAX_SUBTENSOR_RETRIES})...")
+                try:
+                    reset_subtensor()  # Clear any stale cached connection
+                    st = await asyncio.wait_for(get_subtensor(), timeout=60)
+                    logger.info("[RunnerLoop] Successfully created subtensor connection")
+                    
+                    # Test the connection by fetching a block
+                    test_block = await asyncio.wait_for(st.get_current_block(), timeout=30)
+                    logger.info(f"[RunnerLoop] Connection verified at block {test_block}")
+                    
+                except asyncio.TimeoutError as te:
+                    st = None  # Clear invalid connection
+                    reset_subtensor()  # Also clear the global cache
+                    raise TimeoutError(f"Subtensor initialization timed out: {te}")
+                except Exception as e:
+                    st = None  # Clear invalid connection
+                    reset_subtensor()  # Also clear the global cache
+                    logger.error(f"[RunnerLoop] Subtensor connection failed: {type(e).__name__}: {e}", exc_info=True)
+                    raise
 
-            block = await st.get_current_block()
-
-            if block <= last_block or block % TEMPO != 0:
-                await st.wait_for_block()
-                continue
-
-            logger.info(f"[RunnerLoop] Triggering runner at block {block}")
-            await runner()
-
-            last_block = block
+            # Try to get current block for tempo-based scheduling
+            should_run = False
+            block = None
+            use_time_fallback = False
+            
+            try:
+                block = await asyncio.wait_for(st.get_current_block(), timeout=30)
+                logger.debug(f"[RunnerLoop] Current block: {block}")
+                
+                if last_successful_run == 0 or (block > last_block and block % TEMPO == 0):
+                    should_run = True
+                    logger.info(f"[RunnerLoop] Triggering runner at block {block}")
+                else:
+                    await st.wait_for_block()
+                    continue
+                    
+            except Exception as e:
+                # Block fetch failed - fall back to time-based scheduling
+                logger.warning(f"[RunnerLoop] Block fetch failed: {type(e).__name__}: {e}")
+                st = None  # Force reconnection on next iteration
+                reset_subtensor()  # Clear the global cached connection
+                
+                time_elapsed = time.time() - last_successful_run
+                expected_interval = TEMPO * 12  # TEMPO blocks * ~12 seconds per block
+                
+                if last_successful_run > 0 and time_elapsed >= expected_interval:
+                    should_run = True
+                    use_time_fallback = True
+                    logger.warning(
+                        f"[RunnerLoop] Blockchain unreachable. Using time-based fallback: "
+                        f"elapsed={time_elapsed:.0f}s, expected={expected_interval:.0f}s"
+                    )
+                else:
+                    # Not enough time has passed, or first run - skip and let retry logic handle it
+                    if last_successful_run == 0:
+                        logger.info("[RunnerLoop] First run - will retry connection")
+                    else:
+                        logger.info(f"[RunnerLoop] Only {time_elapsed:.0f}s elapsed (need {expected_interval:.0f}s), will retry")
+                    raise  # Re-raise to trigger retry logic
+                    
+            if should_run:
+                if use_time_fallback:
+                    logger.info("[RunnerLoop] Running validation via time-based fallback (blockchain unreachable)")
+                
+                await runner(subtensor=st if st is not None else None)
+                
+                if block is not None:
+                    last_block = block
+                last_successful_run = time.time()
+                consecutive_failures = 0  # Reset after successful validation cycle
 
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.warning(f"[RunnerLoop] Error: {e}; retrying…")
-            st = None
-            await asyncio.sleep(120)
+            consecutive_failures += 1
+            logger.warning(
+                f"[RunnerLoop] Error (attempt {consecutive_failures}/{MAX_SUBTENSOR_RETRIES}): {type(e).__name__}: {e}"
+            )
+            
+            if consecutive_failures >= MAX_SUBTENSOR_RETRIES:
+                logger.error(
+                    f"[RunnerLoop] Max retries ({MAX_SUBTENSOR_RETRIES}) exceeded. "
+                    f"Endpoints: primary={settings.BITTENSOR_SUBTENSOR_ENDPOINT}, "
+                    f"fallback={settings.BITTENSOR_SUBTENSOR_FALLBACK}"
+                )
+                logger.error(
+                    "[RunnerLoop] Unable to connect to Bittensor network. "
+                    "Sleeping for 5 minutes before retry cycle..."
+                )
+                consecutive_failures = 0  # Reset counter
+                st = None
+                await asyncio.sleep(300)  # Sleep 5 minutes before trying again
+            else:
+                logger.info(f"[RunnerLoop] Retrying in 120 seconds...")
+                st = None
+                await asyncio.sleep(120)

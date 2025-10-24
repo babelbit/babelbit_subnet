@@ -17,6 +17,13 @@ logger = getLogger(__name__)
 _SUBTENSOR = None
 
 
+def reset_subtensor():
+    """Reset the global subtensor connection (useful when connection becomes stale)."""
+    global _SUBTENSOR
+    _SUBTENSOR = None
+    logger.info("🔄 Subtensor connection reset")
+
+
 def load_hotkey_keypair(wallet_name: str, hotkey_name: str) -> Keypair:
     settings = get_settings()
 
