@@ -2,26 +2,12 @@ import os, time, socket, asyncio, logging
 from aiohttp import web
 import bittensor as bt
 
+from babelbit.utils.bittensor_helpers import get_subtensor, reset_subtensor
 from babelbit.utils.settings import get_settings
 
 logger = logging.getLogger("sv-signer")
 
 NETUID = int(os.getenv("BABELBIT_NETUID", "59"))
-
-
-async def get_subtensor():
-    settings = get_settings()
-    ep = settings.BITTENSOR_SUBTENSOR_ENDPOINT
-    fb = settings.BITTENSOR_SUBTENSOR_FALLBACK
-    st = bt.async_subtensor(ep)
-    try:
-        await st.initialize()
-        return st
-    except Exception:
-        logger.warning("Subtensor init failed; fallback to %s", fb)
-        st = bt.async_subtensor(fb)
-        await st.initialize()
-        return st
 
 
 async def _set_weights_with_confirmation(
@@ -35,20 +21,25 @@ async def _set_weights_with_confirmation(
     log_prefix: str = "[signer]",
 ) -> bool:
     """"""
-    settings = get_settings()
     for attempt in range(retries):
         try:
             st = await get_subtensor()
             ref_block = await st.get_current_block()
 
             # extrinsic
-            bt.subtensor(settings.BITTENSOR_SUBTENSOR_ENDPOINT).set_weights(
+            success = await st.set_weights(
                 wallet=wallet,
                 netuid=netuid,
                 uids=uids,
                 weights=weights,
                 wait_for_inclusion=wait_for_inclusion,
             )
+
+            if not success:
+                logger.warning("%s set_weights returned False, retry...", log_prefix)
+                await asyncio.sleep(delay_s)
+                continue
+
             logger.info(
                 "%s extrinsic submitted; waiting next block … (ref=%d)",
                 log_prefix,
@@ -86,6 +77,8 @@ async def _set_weights_with_confirmation(
                 type(e).__name__,
                 e,
             )
+            # Reset stale connection on error
+            reset_subtensor()
         await asyncio.sleep(delay_s)
     return False
 
@@ -217,5 +210,14 @@ async def run_signer() -> None:
         "Signer listening on http://%s:%s hostname=%s ip=%s", host, port, hn, ip
     )
 
-    while True:
-        await asyncio.sleep(3600)
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        logger.info("Signer received shutdown signal")
+    finally:
+        # Cleanup on shutdown
+        logger.info("Shutting down signer...")
+        reset_subtensor()  # Close subtensor connection
+        await runner.cleanup()
+        logger.info("Signer shutdown complete")

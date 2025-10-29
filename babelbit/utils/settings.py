@@ -35,6 +35,7 @@ class Settings(BaseModel):
     BB_MINER_PREDICT_ENDPOINT: str
     BB_ENABLE_DB_WRITES: bool
     BB_UTTERANCE_ENGINE_URL: str
+    BB_RUNNER_ON_STARTUP: bool
 
 
     # Template paths
@@ -120,7 +121,8 @@ def get_settings() -> Settings:
         BABELBIT_MAX_CONCURRENT_API_CALLS=int(getenv("BABELBIT_MAX_CONCURRENT_API_CALLS", "1")),
         BB_MINER_PREDICT_ENDPOINT=getenv("BB_MINER_PREDICT_ENDPOINT", "predict"),
         BB_ENABLE_DB_WRITES=getenv("BB_ENABLE_DB_WRITES", "0").lower() in ("1", "true", "yes"),
-        BB_UTTERANCE_ENGINE_URL=getenv("BB_UTTERANCE_ENGINE_URL", "https://api.babelbit.ai"),
+        BB_UTTERANCE_ENGINE_URL=getenv("BB_UTTERANCE_ENGINE_URL", "http://localhost:8999"),
+        BB_RUNNER_ON_STARTUP=int(getenv("BB_RUNNER_ON_STARTUP", "false").lower() in ("1", "true", "yes")),
         
         
 

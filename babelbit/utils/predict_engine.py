@@ -1,33 +1,36 @@
-from typing import Any
+from typing import Any, Optional
 from time import monotonic
 from json import loads
 from random import uniform
 from logging import getLogger
 
-from asyncio import TimeoutError, sleep, gather
+from asyncio import TimeoutError, sleep, gather, wait_for
 from aiohttp import ClientError, ClientTimeout
 
 # from babelbit.chute_template.schemas import SVPredictInput
 from babelbit.utils.data_models import BBPredictedUtterance, BBPredictOutput
 from babelbit.utils.settings import get_settings
-from babelbit.utils.async_clients import get_async_client, get_semaphore
+from babelbit.utils.async_clients import get_async_client
 # from babelbit.utils.challenges import prepare_challenge_payload
 from babelbit.utils.chutes_helpers import get_chute_slug_and_id
 
 logger = getLogger(__name__)
 
 
-async def create_chute_prediction_callback(slug: str, timeout: float = 10.0):
+async def create_chute_prediction_callback(slug: str, timeout: Optional[float] = None):
     """
     Create a prediction callback function for use with utterance engine.
     
     Args:
         slug: The chute slug to call for predictions
-        timeout: Timeout in seconds for chute predictions (default: 10.0)
+        timeout: Timeout in seconds for chute predictions (default: uses CHUTES_TIMEOUT_SEC from settings)
         
     Returns:
         Async callback function that can be used with interact_with_utterance_engine
     """
+    if timeout is None:
+        settings = get_settings()
+        timeout = float(settings.CHUTES_TIMEOUT_SEC)
     async def chute_predictor(session_id: str, current_word: str, utterance_index: int, context: str = "") -> str:
         """
         Call the chute to predict the next token in an utterance.
@@ -70,8 +73,11 @@ async def create_chute_prediction_callback(slug: str, timeout: float = 10.0):
     return chute_predictor
 
 
-async def call_miner_model_on_chutes(slug: str, payload: BBPredictedUtterance, context_used: str, timeout: float = 10.0) -> BBPredictOutput:
+async def call_miner_model_on_chutes(slug: str, payload: BBPredictedUtterance, context_used: str, timeout: Optional[float] = None) -> BBPredictOutput:
     """Call a miner's chute for utterance prediction."""
+    if timeout is None:
+        settings = get_settings()
+        timeout = float(settings.CHUTES_TIMEOUT_SEC)
     return await predict_utterance(payload=payload, slug=slug, context_used=context_used, timeout=timeout)
 
 
@@ -79,7 +85,7 @@ async def predict_utterance(
     payload: BBPredictedUtterance,
     slug: str,
     context_used: str,
-    timeout: float = 10.0,
+    timeout: Optional[float] = None,
 ) -> BBPredictOutput:
     """
     Call a chute to predict the next token in an utterance.
@@ -88,12 +94,47 @@ async def predict_utterance(
         payload: The utterance prediction payload
         slug: The chute slug to call
         context_used: The context that was used for the prediction
-        timeout: Timeout in seconds for the HTTP request (default: 10.0)
+        timeout: Timeout in seconds for the HTTP request (default: uses CHUTES_TIMEOUT_SEC from settings)
         
     Returns:
         BBPredictOutput with prediction results
     """
     settings = get_settings()
+    
+    if timeout is None:
+        timeout = float(settings.CHUTES_TIMEOUT_SEC)
+    
+    # Hard timeout wrapper to prevent hangs
+    # Give extra time for retries: timeout * (retries + 1) + backoff overhead
+    max_total_time = timeout * (settings.CHUTES_API_N_RETRIES + 1) + 5.0
+    
+    try:
+        return await wait_for(
+            _predict_utterance_impl(payload, slug, context_used, timeout, settings),
+            timeout=max_total_time
+        )
+    except TimeoutError:
+        logger.error(f"Hard timeout ({max_total_time}s) reached for slug={slug}")
+        return BBPredictOutput(
+            success=False,
+            model="unknown",
+            utterance=payload,
+            error=f"hard_timeout:{max_total_time}s",
+            context_used=context_used,
+            complete=False,
+        )
+
+
+async def _predict_utterance_impl(
+    payload: BBPredictedUtterance,
+    slug: str,
+    context_used: str,
+    timeout: float,
+    settings: Any,
+) -> BBPredictOutput:
+    """
+    Internal implementation of predict_utterance with retry logic.
+    """
 
     base_url = settings.CHUTES_MINER_BASE_URL_TEMPLATE.format(slug=slug)
     url = f"{base_url}/{settings.CHUTES_MINER_PREDICT_ENDPOINT}"
@@ -114,7 +155,6 @@ async def predict_utterance(
         "Authorization": f"Bearer {api_key.get_secret_value()}",
     }
     session = await get_async_client()
-    semaphore = get_semaphore()
 
     # Track latency from first attempt
     t0 = monotonic()
@@ -123,37 +163,38 @@ async def predict_utterance(
 
     for attempt in range(1, settings.CHUTES_API_N_RETRIES + 2):
         try:
-            async with semaphore:
-                async with session.post(
-                    url, headers=headers, json=payload.model_dump(mode="json"), timeout=ClientTimeout(total=timeout)
-                ) as response:
-                    text = await response.text()
-                    if response.status == 429:
-                        last_err = f"busy:{text[:120]}"
-                        raise RuntimeError("busy")
-                    if 400 <= response.status < 500:
-                        return BBPredictOutput(
-                            success=False,
-                            model="unknown",
-                            utterance=payload,
-                            error=f"{response.status}:{text[:300]}",
-                            context_used=context_used,
-                            complete=False,
-                        )
-                    if response.status != 200:
-                        raise RuntimeError(f"HTTP {response.status}: {text[:300]}")
-
-                    data = loads(text)  # Expected to match BBPredictOutput format
-
-                    # Parse the response and create BBPredictOutput
+            # Removed semaphore to allow unlimited concurrent requests to miners
+            # Validators shouldn't be throttled by client-side concurrency limits
+            async with session.post(
+                url, headers=headers, json=payload.model_dump(mode="json"), timeout=ClientTimeout(total=timeout)
+            ) as response:
+                text = await response.text()
+                if response.status == 429:
+                    last_err = f"busy:{text[:120]}"
+                    raise RuntimeError("busy")
+                if 400 <= response.status < 500:
                     return BBPredictOutput(
-                        success=bool(data.get("success", True)),
-                        model=data.get("model", "unknown"),
-                        utterance=BBPredictedUtterance.model_validate(data.get("utterance", payload.model_dump())),
-                        error=data.get("error"),
-                        context_used=data.get("context_used", context_used),
-                        complete=bool(data.get("complete", False)),
+                        success=False,
+                        model="unknown",
+                        utterance=payload,
+                        error=f"{response.status}:{text[:300]}",
+                        context_used=context_used,
+                        complete=False,
                     )
+                if response.status != 200:
+                    raise RuntimeError(f"HTTP {response.status}: {text[:300]}")
+
+                data = loads(text)  # Expected to match BBPredictOutput format
+
+                # Parse the response and create BBPredictOutput
+                return BBPredictOutput(
+                    success=bool(data.get("success", True)),
+                    model=data.get("model", "unknown"),
+                    utterance=BBPredictedUtterance.model_validate(data.get("utterance", payload.model_dump())),
+                    error=data.get("error"),
+                    context_used=data.get("context_used", context_used),
+                    complete=bool(data.get("complete", False)),
+                )
 
         except TimeoutError as e:
             last_err = f"timeout:{e}"

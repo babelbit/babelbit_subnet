@@ -61,6 +61,43 @@ async def get_subtensor():
     return _SUBTENSOR
 
 
+async def wait_until_block_modulo(subtensor, modulo: int, offset: int = 0):
+    """
+    Wait until the current block number satisfies: (block + offset) % modulo == 0
+    This ensures validators synchronize their operations at specific block intervals.
+    
+    Always waits for the NEXT sync block, even if currently at a sync block, to ensure
+    proper spacing between operations.
+    
+    Args:
+        subtensor: The bittensor subtensor instance
+        modulo: The block interval (e.g., 5 means sync every 5 blocks)
+        offset: Optional offset to adjust the target block
+    """
+    if modulo <= 0:
+        return
+    
+    current_block = await subtensor.get_current_block()
+    blocks_until_target = (modulo - ((current_block + offset) % modulo)) % modulo
+    
+    # If we're at a sync block, wait for the next one
+    if blocks_until_target == 0:
+        blocks_until_target = modulo
+    
+    target_block = current_block + blocks_until_target
+    
+    # Wait for the target block (roughly 12 seconds per block)
+    wait_seconds = blocks_until_target * 12
+    logger.info(f"⏱️  Waiting {blocks_until_target} blocks (~{wait_seconds}s) for block sync (current: {current_block} → target: {target_block})")
+    
+    while True:
+        await asyncio.sleep(6)  # Check every ~half block
+        current_block = await subtensor.get_current_block()
+        if current_block >= target_block:
+            logger.info(f"✅ Block sync achieved at block {current_block}")
+            return
+
+
 async def on_chain_commit(
     skip: bool, revision: str, chute_id: str, chute_slug: str | None
 ) -> None:
