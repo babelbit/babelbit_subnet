@@ -137,6 +137,18 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
         logger.warning(f"Could not get current challenge ID: {e}")
         return
 
+    # Prevents runner loop from running multiple times a challenge
+    if challenge_uid:
+        already_processed = get_processed_miners_for_challenge(str(scores_dir), challenge_uid)
+        if already_processed:
+            logger.info(
+                f"Challenge {challenge_uid} already has {len(already_processed)} scored miners. "
+                f"Skipping entire run to avoid duplicate work."
+            )
+            return
+        else:
+            logger.info(f"Challenge {challenge_uid}: No existing scores found, proceeding with miner evaluation")
+
     try:
         miners = await get_miners_from_registry(NETUID, subtensor=subtensor)
         logger.info(f"Found {len(miners)} eligible miners from registry: {list(miners.keys())}")
@@ -147,23 +159,6 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
         miner_list = list(miners.values())
         random.shuffle(miner_list)
         miner_list = miner_list[: min(MAX_MINERS, len(miner_list))]
-
-        # TODO: use db to filter processed miners
-        # (for now, just use existing score files in scores_dir)
-        # Filter out miners that already have results for this challenge
-        if challenge_uid:
-            already_processed = get_processed_miners_for_challenge(str(scores_dir), challenge_uid)
-            if already_processed:
-                # before_count = len(miner_list)
-                # miner_list = [m for m in miner_list if (getattr(m, 'uid', None), getattr(m, 'hotkey', None)) not in already_processed]
-                # after_count = len(miner_list)
-                # skipped = before_count - after_count
-                # if skipped:
-                #     logger.info(f"Skipping {skipped} miners already processed for challenge {challenge_uid}")
-
-                logger.info(f"Challenge {challenge_uid}: Skipping {len(already_processed)} miners already processed")
-            else:
-                logger.info(f"No previously processed miners detected for challenge {challenge_uid}")
 
         if not miner_list:
             logger.info("No miners to process after filtering")
