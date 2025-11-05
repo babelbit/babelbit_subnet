@@ -12,8 +12,10 @@ services:
     environment:
       - BABELBIT_CACHE_DIR=/app/data/blocks
       - SIGNER_URL=http://signer:8080
+      - BB_CHALLENGE_STATUS_DIR=/app/data/challenge_status
     volumes:
       - validator-cache:/app/data/blocks
+      - challenge-status:/app/data/challenge_status  # Shared challenge status tracking
       - ~/.bittensor/wallets:/root/.bittensor/wallets:ro  # Mount Bittensor wallets
     ports:
       - "8001:8000"
@@ -27,12 +29,14 @@ services:
     container_name: babelbit-runner
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets:ro  # Mount Bittensor wallets
+      - challenge-status:/app/data/challenge_status  # Shared challenge status tracking
     ports:
       - "8002:8000"
     environment:
       BABELBIT_METRICS_PORT: 8000
       BABELBIT_METRICS_ADDR: 0.0.0.0
       SIGNER_URL: http://signer:8080
+      BB_CHALLENGE_STATUS_DIR: /app/data/challenge_status
     command: ["bb", "-v", "runner"]
 
   signer:
@@ -56,3 +60,4 @@ services:
 volumes:
   # TODO: add scores and logs as volumes
   validator-cache:
+  challenge-status:  # Shared volume for challenge status tracking between validator and runner

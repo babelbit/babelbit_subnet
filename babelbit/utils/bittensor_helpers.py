@@ -17,9 +17,16 @@ logger = getLogger(__name__)
 _SUBTENSOR = None
 
 
-def reset_subtensor():
+async def reset_subtensor():
     """Reset the global subtensor connection (useful when connection becomes stale)."""
     global _SUBTENSOR
+    if _SUBTENSOR is not None:
+        try:
+            # Properly close the connection to prevent memory leaks
+            await _SUBTENSOR.close()
+            logger.info("🔄 Subtensor connection closed")
+        except Exception as e:
+            logger.warning("⚠️  Error closing subtensor connection: %s", e)
     _SUBTENSOR = None
     logger.info("🔄 Subtensor connection reset")
 

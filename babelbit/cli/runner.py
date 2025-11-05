@@ -33,6 +33,7 @@ from babelbit.utils.db_pool import (
     insert_scoring_staging,
     insert_scoring_submissions_bulk,
 )
+from babelbit.utils.challenge_status import mark_challenge_processed
 # Scoring policy: Runner performs per-dialogue scoring using score_dialogue.score_jsonl
 # immediately after writing the raw dialogue JSONL, then persists both dialogue score JSONs
 # and a challenge summary JSON per miner. This keeps downstream evaluation simple while
@@ -209,6 +210,11 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
             step_block_modulo=step_block_modulo
         )
         
+        # Track statistics for challenge status
+        total_miners_processed = 0
+        total_dialogues_processed = 0
+        all_challenge_scores: List[float] = []
+        
         # Now score each miner's dialogues
         for m in miner_list:
             try:
@@ -321,6 +327,7 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
                 # Miner-level challenge summary
                 if dialogue_scores and dialogue_uids:
                     try:
+                        miner_mean_score = sum(dialogue_scores) / len(dialogue_scores)
                         summary = {
                             "challenge_uid": challenge_uid,
                             "miner_uid": getattr(m, 'uid', None),
@@ -329,9 +336,15 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
                                 {"dialogue_uid": duid, "dialogue_average_u_best_early": ds, "dialogue_index": idx}
                                 for idx, (duid, ds) in enumerate(zip(dialogue_uids, dialogue_scores))
                             ],
-                            "challenge_mean_U": (sum(dialogue_scores) / len(dialogue_scores)) if dialogue_scores else None,
+                            "challenge_mean_U": miner_mean_score,
                         }
                         summary_path = save_challenge_summary_file(summary, output_dir=str(scores_dir))
+                        
+                        # Track statistics for challenge status
+                        total_miners_processed += 1
+                        total_dialogues_processed += len(dialogue_scores)
+                        all_challenge_scores.append(miner_mean_score)
+                        
                         if s3_manager:
                             # Upload to bucket/submissions/ directory structure
                             s3_sub_path = f"submissions/{Path(summary_path).name}"
@@ -359,6 +372,25 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
                     e,
                 )
                 continue
+        
+        # Mark challenge as processed after all miners are evaluated
+        if challenge_uid and total_miners_processed > 0:
+            overall_mean = sum(all_challenge_scores) / len(all_challenge_scores) if all_challenge_scores else None
+            mark_challenge_processed(
+                challenge_uid=challenge_uid,
+                miner_count=total_miners_processed,
+                total_dialogues=total_dialogues_processed,
+                mean_score=overall_mean,
+                metadata={
+                    "scores_dir": str(scores_dir),
+                    "logs_dir": str(logs_dir),
+                }
+            )
+            mean_score_str = f"{overall_mean:.4f}" if overall_mean is not None else "N/A"
+            logger.info(
+                f"Challenge {challenge_uid} completed: {total_miners_processed} miners, "
+                f"{total_dialogues_processed} dialogues, mean_score={mean_score_str}"
+            )
                 
     except Exception as e:
         logger.error(f"Runner failed: {type(e).__name__}: {e}", exc_info=True)
@@ -385,7 +417,7 @@ async def runner_loop():
             if st is None:
                 logger.info(f"[RunnerLoop] Attempting to connect to subtensor (attempt {consecutive_failures + 1}/{MAX_SUBTENSOR_RETRIES})...")
                 try:
-                    reset_subtensor()  # Clear any stale cached connection
+                    await reset_subtensor()  # Clear any stale cached connection
                     st = await asyncio.wait_for(get_subtensor(), timeout=60)
                     logger.info("[RunnerLoop] Successfully created subtensor connection")
                     
@@ -395,11 +427,11 @@ async def runner_loop():
                     
                 except asyncio.TimeoutError as te:
                     st = None  # Clear invalid connection
-                    reset_subtensor()  # Also clear the global cache
+                    await reset_subtensor()  # Also clear the global cache
                     raise TimeoutError(f"Subtensor initialization timed out: {te}")
                 except Exception as e:
                     st = None  # Clear invalid connection
-                    reset_subtensor()  # Also clear the global cache
+                    await reset_subtensor()  # Also clear the global cache
                     logger.error(f"[RunnerLoop] Subtensor connection failed: {type(e).__name__}: {e}", exc_info=True)
                     raise
 
@@ -424,7 +456,7 @@ async def runner_loop():
                 # Block fetch failed - fall back to time-based scheduling
                 logger.warning(f"[RunnerLoop] Block fetch failed: {type(e).__name__}: {e}")
                 st = None  # Force reconnection on next iteration
-                reset_subtensor()  # Clear the global cached connection
+                await reset_subtensor()  # Clear the global cached connection
                 
                 time_elapsed = time.time() - last_successful_run
                 expected_interval = TEMPO * 12  # TEMPO blocks * ~12 seconds per block

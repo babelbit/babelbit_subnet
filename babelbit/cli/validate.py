@@ -22,6 +22,7 @@ from babelbit.utils.prometheus import (
 from babelbit.utils.settings import get_settings
 from babelbit.utils.db_pool import db_pool, _iter_scores_from_db
 from babelbit.utils.utterance_auth import init_utterance_auth, authenticate_utterance_engine
+from babelbit.utils.challenge_status import is_challenge_processed, is_challenge_processed_db
 
 logger = logging.getLogger("babelbit.validator")
 
@@ -59,6 +60,12 @@ async def _validate_main(tail: int, alpha: float, m_min: int, tempo: int):
 
     st = None
     last_done = -1
+    consecutive_skipped_epochs = 0
+    last_epoch_block = -1  # Track last epoch boundary for counting
+    last_challenge_uid = None  # Track current challenge to reset counter on change
+    BB_MAX_SKIPPED_WEIGHT_EPOCHS = int(os.getenv("BB_MAX_SKIPPED_WEIGHT_EPOCHS", "6"))
+    EPOCH_LENGTH = 360  # blocks per epoch
+    
     while True:
         try:
             if st is None:
@@ -95,11 +102,40 @@ async def _validate_main(tail: int, alpha: float, m_min: int, tempo: int):
                     st = None
                 continue
 
-            uids, weights = await get_weights(tail=tail, alpha=alpha, m_min=m_min)
+            uids, weights, current_challenge_uid = await get_weights(
+                tail=tail, 
+                alpha=alpha, 
+                m_min=m_min, 
+                consecutive_skipped_epochs=consecutive_skipped_epochs
+            )
+            
+            # Reset skip counter if challenge changed
+            if current_challenge_uid and current_challenge_uid != last_challenge_uid:
+                if last_challenge_uid:
+                    logger.info(
+                        f"Challenge changed from {last_challenge_uid} to {current_challenge_uid}. "
+                        f"Resetting skip counter."
+                    )
+                consecutive_skipped_epochs = 0
+                last_challenge_uid = current_challenge_uid
+            
             if not uids:
-                logger.warning("No eligible uids this round; skipping.")
+                # Increment epoch counter if we're at a new epoch boundary
+                current_epoch = block // EPOCH_LENGTH
+                if current_epoch > (last_epoch_block // EPOCH_LENGTH):
+                    consecutive_skipped_epochs += 1
+                    last_epoch_block = block
+                    
+                logger.info(
+                    f"No weights to set this round (waiting for runner to process current challenge) "
+                    f"[skipped {consecutive_skipped_epochs}/{BB_MAX_SKIPPED_WEIGHT_EPOCHS} epochs]"
+                )
                 last_done = block
                 continue
+            
+            # Reset skip counter on successful weight assignment
+            consecutive_skipped_epochs = 0
+            last_epoch_block = block
 
             ok = await retry_set_weights(wallet, uids, weights)
             if ok:
@@ -129,7 +165,7 @@ async def _validate_main(tail: int, alpha: float, m_min: int, tempo: int):
 
 # ---------------- Weights selection ---------------- #
 
-async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25):  # tail & m_min kept for CLI compatibility, ignored
+async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25, consecutive_skipped_epochs: int = 0):  # tail & m_min kept for CLI compatibility, ignored
     """Select winning miner weights (current challenge only).
 
         - Gets the current active challenge ID from utterance engine
@@ -139,7 +175,16 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25):  
         - Returns sparse weights: single winner with weight 1.0.
 
     Fallback:
-        - If no current challenge or no scores for current challenge: default to uid 0
+        - If no current challenge or no scores for current challenge after MAX_SKIPPED_ROUNDS: default to uid 248
+        
+    Args:
+        tail: (unused, kept for CLI compatibility)
+        alpha: (unused, kept for CLI compatibility) 
+        m_min: (unused, kept for CLI compatibility)
+        consecutive_skipped_epochs: Number of consecutive epochs weights were skipped (for fallback logic)
+        
+    Returns:
+        tuple: (uids, weights, challenge_uid) - The challenge_uid allows caller to detect challenge changes
     """
     from babelbit.utils.predict_utterances import get_current_challenge_uid
     
@@ -148,6 +193,9 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25):  
     NETUID = settings.BABELBIT_NETUID
     meta = await st.metagraph(NETUID)
     hk_to_uid = {hk: i for i, hk in enumerate(meta.hotkeys)}
+
+    # Get max skipped epochs before falling back to default weight
+    MAX_SKIPPED_EPOCHS = int(os.getenv("BB_MAX_SKIPPED_WEIGHT_EPOCHS", "6"))
 
     # Get the current active challenge ID
     current_challenge_uid = None
@@ -159,6 +207,34 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25):  
         except Exception as e:
             logger.warning(f"Failed to get current challenge ID from {utterance_engine_url}: {e}")
 
+    # Check if current challenge has been processed before fetching scores
+    challenge_processed = False
+    if current_challenge_uid:
+        # First check file-based status (fast)
+        challenge_processed = is_challenge_processed(current_challenge_uid)
+        
+        # If not found in files, check DB as fallback
+        if not challenge_processed:
+            logger.debug(f"Challenge {current_challenge_uid} not found in status files, checking DB...")
+            challenge_processed = await is_challenge_processed_db(current_challenge_uid)
+    
+    # If challenge hasn't been processed yet, use last challenge winner
+    if current_challenge_uid and not challenge_processed:
+        # Check if we've exceeded the maximum number of skipped epochs
+        if consecutive_skipped_epochs >= MAX_SKIPPED_EPOCHS:
+            logger.warning(
+                f"Challenge {current_challenge_uid} has not been processed after {consecutive_skipped_epochs} epochs. "
+                f"Falling back to default weight assignment (uid 248) to prevent stalling."
+            )
+            # Fall through to check DB - if still no scores, will return default at the end
+        else:
+            logger.info(
+                f"Challenge {current_challenge_uid} has not been processed by runner yet. "
+                f"Using last challenge winner for weights ({consecutive_skipped_epochs}/{MAX_SKIPPED_EPOCHS})."
+            )
+            # Use the last challenge instead of returning empty weights
+            current_challenge_uid = None  # Will trigger fallback to most recent challenge in DB
+
     # Fetch scores based on whether we have a current challenge ID
     try:
         await db_pool.init()
@@ -166,24 +242,52 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25):  
         # Track which data source we used for logging
         data_source = None
         
-        if current_challenge_uid:
+        # Determine whether to use current challenge or fallback to last challenge
+        use_current_challenge = current_challenge_uid is not None
+        
+        if use_current_challenge and current_challenge_uid:  # Type guard for mypy
             # Use efficient challenge-specific query
             from babelbit.utils.db_pool import _iter_scores_for_challenge
             challenge_scores = await _iter_scores_for_challenge(current_challenge_uid)
             if not challenge_scores:
-                logger.warning(f"No scores found for current challenge {current_challenge_uid} → default weight uid 248")
-                return [248], [1.0]
-            logger.info(f"Found {len(challenge_scores)} miners with scores for current challenge {current_challenge_uid}")
-            # Convert to the expected format for later processing
-            current_rows = [(hk, score, current_challenge_uid) for hk, score in challenge_scores]
-            data_source = "current_challenge"
-        else:
+                # Check if we should fall back to default weight
+                if consecutive_skipped_epochs >= MAX_SKIPPED_EPOCHS:
+                    logger.warning(
+                        f"No scores found for current challenge {current_challenge_uid} after {consecutive_skipped_epochs} epochs. "
+                        f"Falling back to default weight (uid 248)."
+                    )
+                    return [248], [1.0], current_challenge_uid
+                else:
+                    logger.warning(
+                        f"No scores found for current challenge {current_challenge_uid}. "
+                        f"Using last challenge winner for weights ({consecutive_skipped_epochs}/{MAX_SKIPPED_EPOCHS})."
+                    )
+                    # Use the last challenge instead
+                    use_current_challenge = False
+            else:
+                logger.info(f"Found {len(challenge_scores)} miners with scores for current challenge {current_challenge_uid}")
+                # Convert to the expected format for later processing
+                current_rows = [(hk, score, current_challenge_uid) for hk, score in challenge_scores]
+                data_source = "current_challenge"
+        
+        if not use_current_challenge:
             # Fallback: fetch recent rows and use most recent challenge
-            logger.warning("No current challenge ID available, falling back to most recent challenge in DB")
+            logger.info("Using most recent challenge in DB for weight assignment")
             db_rows = await _iter_scores_from_db(limit=tail)
             if not db_rows:
-                logger.warning("No DB scoring data → default weight uid 248")
-                return [248], [1.0]
+                # No historical data available at all
+                if consecutive_skipped_epochs >= MAX_SKIPPED_EPOCHS:
+                    logger.warning(
+                        f"No DB scoring data available (no historical challenges) after {consecutive_skipped_epochs} epochs. "
+                        f"Falling back to default weight (uid 248)."
+                    )
+                    return [248], [1.0], None
+                else:
+                    logger.warning(
+                        f"No DB scoring data available (no historical challenges). "
+                        f"Cannot assign weights - waiting for first challenge to complete ({consecutive_skipped_epochs}/{MAX_SKIPPED_EPOCHS})."
+                    )
+                    return [], [], None
             
             # Parse and find latest challenge
             enriched = []
@@ -206,8 +310,19 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25):  
             
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("DB init/fetch failure in get_weights: %s", e)
-        logger.warning("No DB scoring data → default weight uid 248")
-        return [248], [1.0]
+        # Check if we should fall back to default weight
+        if consecutive_skipped_epochs >= MAX_SKIPPED_EPOCHS:
+            logger.warning(
+                f"No DB scoring data available due to error after {consecutive_skipped_epochs} epochs. "
+                f"Falling back to default weight (uid 248)."
+            )
+            return [248], [1.0], None
+        else:
+            logger.warning(
+                f"No DB scoring data available due to error. "
+                f"Skipping weights this round (waiting for runner to process challenges) ({consecutive_skipped_epochs}/{MAX_SKIPPED_EPOCHS})."
+            )
+            return [], [], None
 
     # Latest score per miner (first row is most recent due to DESC ordering)
     latest_per_hk: dict[str, float] = {}
@@ -218,8 +333,19 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25):  
             latest_per_hk[hk] = score  # first seen is latest
 
     if not latest_per_hk:
-        logger.warning("No eligible miner scores for latest challenge → default uid 248")
-        return [248], [1.0]
+        # Check if we should fall back to default weight
+        if consecutive_skipped_epochs >= MAX_SKIPPED_EPOCHS:
+            logger.warning(
+                f"No eligible miner scores for latest challenge after {consecutive_skipped_epochs} epochs. "
+                f"Falling back to default weight (uid 248)."
+            )
+            return [248], [1.0], current_challenge_uid
+        else:
+            logger.warning(
+                f"No eligible miner scores for latest challenge. "
+                f"Skipping weights this round (waiting for eligible miners) ({consecutive_skipped_epochs}/{MAX_SKIPPED_EPOCHS})."
+            )
+            return [], [], current_challenge_uid
 
     winner_hk = max(latest_per_hk.keys(), key=lambda k: latest_per_hk[k])
     winner_uid = hk_to_uid.get(winner_hk, 0)
@@ -243,7 +369,7 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25):  
         1,
         data_source or "unknown",
     )
-    return uids, weights
+    return uids, weights, current_challenge_uid
 
 
 async def retry_set_weights(wallet, uids, weights):

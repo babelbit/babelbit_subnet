@@ -20,6 +20,8 @@ from babelbit.utils.db_pool import (
     insert_challenges_bulk,
     fetch_challenge_ids_by_uid,
     health_check,
+    insert_scoring_staging,
+    insert_scoring_submissions_bulk,
 )
 
 try:  # pragma: no cover
@@ -124,6 +126,43 @@ async def setup_db(pg_container):
         )
         """
     )
+    
+    # Create scoring_staging table for validator tests
+    await db_pool.execute(
+        """
+        CREATE TABLE IF NOT EXISTS public.scoring_staging (
+            id BIGSERIAL PRIMARY KEY,
+            file_content JSONB NOT NULL,
+            file_path VARCHAR(1024) NOT NULL,
+            json_created_at TIMESTAMP NOT NULL,
+            staging_inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    
+    # Create scoring_submissions table for validator tests
+    await db_pool.execute(
+        """
+        CREATE TABLE IF NOT EXISTS public.scoring_submissions (
+            id BIGSERIAL PRIMARY KEY,
+            scoring_staging_id BIGINT NOT NULL REFERENCES public.scoring_staging(id) ON DELETE CASCADE,
+            challenge_uid VARCHAR(50),
+            dialogue_uid VARCHAR(50),
+            miner_uid INT,
+            miner_hotkey VARCHAR(255),
+            utterance_number INT NOT NULL,
+            ground_truth TEXT NOT NULL,
+            best_step INT NOT NULL,
+            u_best FLOAT NOT NULL,
+            total_steps INT NOT NULL,
+            average_u_best_early FLOAT NOT NULL,
+            json_created_at TIMESTAMP NOT NULL,
+            staging_inserted_at TIMESTAMP NOT NULL,
+            submission_inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    
     yield
 
 
@@ -186,3 +225,190 @@ async def test_bulk_insert_multiple_challenges():
     await insert_challenges_bulk(rows)
     ids = await fetch_challenge_ids_by_uid("cu-0")
     assert ids, "Expected at least one row for cu-0"
+
+
+# --------------------------------------------------------------------------
+# Database Write Failure Tests
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_insert_scoring_staging_database_unavailable(pg_container):
+    """Test insert_scoring_staging raises exception when database connection fails."""
+    from unittest.mock import patch, AsyncMock
+    
+    ts = datetime.now(UTC)
+    
+    # Mock the db_pool.fetchval to simulate connection failure
+    with patch.object(db_pool, "fetchval", new_callable=AsyncMock) as mock_fetchval:
+        mock_fetchval.side_effect = Exception("Connection refused")
+        
+        with pytest.raises(Exception, match="Connection refused"):
+            await insert_scoring_staging(
+                file_content={"test": "data"},
+                file_path="/tmp/test.json",
+                json_created_at=ts
+            )
+
+
+@pytest.mark.asyncio
+async def test_insert_scoring_submissions_bulk_invalid_data(pg_container):
+    """Test insert_scoring_submissions_bulk successfully inserts rows with optional NULL fields."""
+    ts = datetime.now(UTC)
+    
+    # Insert a valid scoring_staging record to get an ID
+    staging_id = await insert_scoring_staging(
+        file_content={"test": "data"},
+        file_path="/tmp/test.json",
+        json_created_at=ts
+    )
+    
+    # Create rows with missing optional fields (challenge_uid, dialogue_uid, etc.)
+    # These use .get() in the function, so they'll be NULL
+    rows = [
+        {
+            "scoring_staging_id": staging_id,
+            # Missing challenge_uid, dialogue_uid, miner_uid, miner_hotkey - all optional
+            "utterance_number": 0,
+            "ground_truth": "text",
+            "best_step": 5,
+            "u_best": 0.9,
+            "total_steps": 10,
+            "average_u_best_early": 0.85,
+            "json_created_at": ts,
+            "staging_inserted_at": ts,
+        }
+    ]
+    
+    # This should succeed - optional fields can be NULL
+    await insert_scoring_submissions_bulk(rows)
+
+
+@pytest.mark.asyncio
+async def test_insert_scoring_submissions_bulk_database_error(pg_container):
+    """Test insert_scoring_submissions_bulk handles database execution errors."""
+    from unittest.mock import patch, AsyncMock
+    
+    ts = datetime.now(UTC)
+    
+    # Insert valid staging record
+    staging_id = await insert_scoring_staging(
+        file_content={"test": "data"},
+        file_path="/tmp/test.json",
+        json_created_at=ts
+    )
+    
+    rows = [
+        {
+            "scoring_staging_id": staging_id,
+            "challenge_uid": "ch-1",
+            "dialogue_uid": "dlg-1",
+            "miner_uid": 1,
+            "miner_hotkey": "hotkey1",
+            "utterance_number": 0,
+            "ground_truth": "text",
+            "best_step": 5,
+            "u_best": 0.9,
+            "total_steps": 10,
+            "average_u_best_early": 0.85,
+            "json_created_at": ts,
+            "staging_inserted_at": ts,
+        }
+    ]
+    
+    # Mock executemany to simulate database error
+    with patch.object(db_pool, "executemany", new_callable=AsyncMock) as mock_executemany:
+        mock_executemany.side_effect = Exception("Database error during bulk insert")
+        
+        with pytest.raises(Exception, match="Database error during bulk insert"):
+            await insert_scoring_submissions_bulk(rows)
+
+
+@pytest.mark.asyncio
+async def test_insert_challenges_bulk_empty_list(pg_container):
+    """Test insert_challenges_bulk handles empty list gracefully."""
+    # Should not raise an exception
+    await insert_challenges_bulk([])
+
+
+@pytest.mark.asyncio
+async def test_insert_scoring_submissions_bulk_empty_list(pg_container):
+    """Test insert_scoring_submissions_bulk handles empty list gracefully."""
+    # Should not raise an exception
+    await insert_scoring_submissions_bulk([])
+
+
+@pytest.mark.asyncio
+async def test_insert_scoring_staging_constraint_violation(pg_container):
+    """Test insert_scoring_staging handles constraint violations (e.g., duplicate unique key)."""
+    from unittest.mock import patch, AsyncMock
+    import asyncpg
+    
+    ts = datetime.now(UTC)
+    
+    # Mock fetchval to simulate unique constraint violation
+    with patch.object(db_pool, "fetchval", new_callable=AsyncMock) as mock_fetchval:
+        mock_fetchval.side_effect = asyncpg.UniqueViolationError("duplicate key value")
+        
+        with pytest.raises(asyncpg.UniqueViolationError):
+            await insert_scoring_staging(
+                file_content={"test": "data"},
+                file_path="/tmp/test.json",
+                json_created_at=ts
+            )
+
+
+@pytest.mark.asyncio
+async def test_insert_challenges_bulk_partial_failure(pg_container):
+    """Test insert_challenges_bulk with mixed valid/invalid data."""
+    from unittest.mock import patch, AsyncMock
+    
+    ts = datetime.now(UTC)
+    
+    # Insert a valid staging record
+    staging_id = await insert_challenge_staging(
+        file_content={"test": "data"},
+        file_path="/tmp/test.json",
+        json_created_at=ts
+    )
+    
+    # Create one valid row and one with invalid foreign key
+    rows = [
+        {
+            "staging_id": staging_id,
+            "challenge_uid": "cu-valid",
+            "dialogue_uid": "du-valid",
+            "utterance_number": 0,
+            "utterance_text": "valid text",
+            "json_created_at": ts,
+            "staging_inserted_at": ts,
+        },
+        {
+            "staging_id": 999999,  # Invalid foreign key
+            "challenge_uid": "cu-invalid",
+            "dialogue_uid": "du-invalid",
+            "utterance_number": 1,
+            "utterance_text": "invalid text",
+            "json_created_at": ts,
+            "staging_inserted_at": ts,
+        }
+    ]
+    
+    # This should fail due to foreign key constraint on the second row
+    with pytest.raises(Exception):
+        await insert_challenges_bulk(rows)
+
+
+@pytest.mark.asyncio
+async def test_health_check_database_down(pg_container):
+    """Test health_check returns False when database is unavailable."""
+    from unittest.mock import patch, AsyncMock
+    
+    # Mock the fetchval to simulate connection failure
+    with patch.object(db_pool, "fetchval", new_callable=AsyncMock) as mock_fetchval:
+        mock_fetchval.side_effect = Exception("Connection timeout")
+        
+        result = await health_check()
+        
+        # Health check should return False on error
+        assert result is False

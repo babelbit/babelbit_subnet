@@ -10,6 +10,7 @@ import json
 import shutil
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
 from typing import List
+from pathlib import Path
 
 from babelbit.cli.runner import runner
 from babelbit.chute_template.schemas import BBPredictedUtterance, BBUtteranceEvaluation
@@ -67,8 +68,9 @@ def sample_miners():
 
 @pytest.fixture
 def sample_dialogue_utterances():
-    """Sample dialogue utterances that would be returned by predict_with_utterance_engine"""
-    return {
+    """Sample dialogue utterances that would be returned by predict_with_utterance_engine_multi_miner"""
+    # Returns dict mapping miner_slug -> {dialogue_uid -> [utterances]}
+    single_dialogue = {
         "dialogue-123": [
             BBPredictedUtterance(
                 index="utterance-1",
@@ -95,6 +97,12 @@ def sample_dialogue_utterances():
                 ground_truth="I'm doing well thanks EOF"
             )
         ]
+    }
+    # Return format for multi_miner: {miner_slug: dialogues_dict}
+    return {
+        "test-miner-1": single_dialogue,
+        "test-miner-2": single_dialogue,
+        "test-miner-3": single_dialogue,
     }
 
 
@@ -146,7 +154,7 @@ class TestRunner:
         with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
              patch('babelbit.cli.runner.get_current_challenge_uid', new_callable=AsyncMock, return_value="challenge-123") as mock_get_challenge, \
              patch('babelbit.cli.runner.get_miners_from_registry', new_callable=AsyncMock) as mock_get_miners, \
-             patch('babelbit.cli.runner.predict_with_utterance_engine', new_callable=AsyncMock) as mock_predict, \
+             patch('babelbit.cli.runner.predict_with_utterance_engine_multi_miner', new_callable=AsyncMock) as mock_predict, \
              patch('babelbit.cli.runner.close_http_clients') as mock_close_clients, \
              patch('babelbit.cli.runner.init_utterance_auth') as mock_init_auth, \
              patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock) as mock_auth:
@@ -155,7 +163,7 @@ class TestRunner:
             
             # Setup mocks
             mock_get_miners.return_value = sample_miners
-            mock_predict.return_value = sample_dialogue_utterances  # Already in dict format
+            mock_predict.return_value = sample_dialogue_utterances  # Dict of miner_slug -> dialogues
             # evaluate removed in file scorer mode
             
             # Run the function
@@ -163,20 +171,14 @@ class TestRunner:
                 await runner(utterance_engine_url="http://localhost:8000", output_dir=temp_scores_dir)
             
             # Verify calls
-            mock_get_miners.assert_called_once_with(42)  # NETUID
-            assert mock_predict.call_count == 3  # Called for each miner
+            mock_get_miners.assert_called_once_with(42, subtensor=None)  # NETUID + subtensor param
+            assert mock_predict.call_count == 1  # Called once for all miners
             
-            for call in mock_predict.call_args_list:
-                args, kwargs = call
-                assert 'challenge_logger' in kwargs and kwargs['challenge_logger'] is None
+            # Verify predict_with_utterance_engine_multi_miner was called with correct args
+            predict_call_kwargs = mock_predict.call_args[1]
+            assert predict_call_kwargs['utterance_engine_url'] == "http://localhost:8000"
+            assert len(predict_call_kwargs['miners']) == 3
             mock_close_clients.assert_called_once()
-            
-            # Verify predict_with_utterance_engine calls
-            predict_calls = mock_predict.call_args_list
-            for call in predict_calls:
-                args, kwargs = call
-                assert kwargs['utterance_engine_url'] == "http://localhost:8000"
-                assert kwargs['chute_slug'] in ['test-miner-1', 'test-miner-2', 'test-miner-3']
             
             # No evaluate path anymore; ensure event JSONLs created per miner per dialogue
             raw_log_files = [f for f in os.listdir(temp_logs_dir) if f.startswith('dialogue_run_') and f.endswith('.jsonl')]
@@ -203,6 +205,8 @@ class TestRunner:
         with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
              patch('babelbit.cli.runner.get_current_challenge_uid', new_callable=AsyncMock, return_value="challenge-123") as mock_get_challenge, \
              patch('babelbit.cli.runner.get_miners_from_registry', new_callable=AsyncMock) as mock_get_miners, \
+             patch('babelbit.cli.runner.init_utterance_auth') as mock_init_auth, \
+             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock) as mock_auth, \
              patch('babelbit.cli.runner.close_http_clients') as mock_close_clients:
             
             # Setup: no miners returned
@@ -213,7 +217,7 @@ class TestRunner:
                 await runner(output_dir=temp_scores_dir)
             
             # Verify behavior
-            mock_get_miners.assert_called_once_with(42)
+            mock_get_miners.assert_called_once_with(42, subtensor=None)
             mock_close_clients.assert_called_once()
 
     @pytest.mark.asyncio
@@ -229,7 +233,9 @@ class TestRunner:
         with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
              patch('babelbit.cli.runner.get_current_challenge_uid', new_callable=AsyncMock, return_value="challenge-123") as mock_get_challenge, \
              patch('babelbit.cli.runner.get_miners_from_registry', new_callable=AsyncMock) as mock_get_miners, \
-             patch('babelbit.cli.runner.predict_with_utterance_engine', new_callable=AsyncMock) as mock_predict, \
+             patch('babelbit.cli.runner.predict_with_utterance_engine_multi_miner', new_callable=AsyncMock) as mock_predict, \
+             patch('babelbit.cli.runner.init_utterance_auth') as mock_init_auth, \
+             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock) as mock_auth, \
              patch('babelbit.cli.runner.close_http_clients') as mock_close_clients:
             
             # Setup mocks
@@ -241,8 +247,8 @@ class TestRunner:
                 await runner(output_dir=temp_scores_dir)
             
             # Verify calls
-            mock_get_miners.assert_called_once_with(42)
-            assert mock_predict.call_count == 3  # Attempted for each miner
+            mock_get_miners.assert_called_once_with(42, subtensor=None)
+            assert mock_predict.call_count == 1  # Called once for all miners
             # evaluate removed
             mock_close_clients.assert_called_once()
 
@@ -260,21 +266,22 @@ class TestRunner:
         with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
              patch('babelbit.cli.runner.get_current_challenge_uid', new_callable=AsyncMock, return_value="challenge-123") as mock_get_challenge, \
              patch('babelbit.cli.runner.get_miners_from_registry', new_callable=AsyncMock) as mock_get_miners, \
-             patch('babelbit.cli.runner.predict_with_utterance_engine', new_callable=AsyncMock) as mock_predict, \
+             patch('babelbit.cli.runner.predict_with_utterance_engine_multi_miner', new_callable=AsyncMock) as mock_predict, \
+             patch('babelbit.cli.runner.init_utterance_auth') as mock_init_auth, \
+             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock) as mock_auth, \
              patch('babelbit.cli.runner.close_http_clients') as mock_close_clients:
             
             # Setup mocks
             mock_get_miners.return_value = sample_miners
             mock_predict.return_value = sample_dialogue_utterances
-            # evaluation removed
             
-            # Run the function (should not crash)
+            # Run the function 
             with patch.dict('os.environ', {'BB_OUTPUT_LOGS_DIR': temp_logs_dir}):
                 await runner(output_dir=temp_scores_dir)
             
             # Verify calls
-            mock_get_miners.assert_called_once_with(42)
-            assert mock_predict.call_count == 3  # Called for each miner
+            mock_get_miners.assert_called_once_with(42, subtensor=None)
+            assert mock_predict.call_count == 1  # Called once for all miners
             # no evaluation assertions
             mock_close_clients.assert_called_once()
 
@@ -288,43 +295,28 @@ class TestRunner:
     ):
         """Test handling when ground truth cannot be extracted from dialogue"""
         
-        # Create utterances without ground_truth in dictionary format
+        # Create utterances without ground_truth - multi_miner format
         utterances_no_gt = {
-            "dialogue-456": [
-                BBPredictedUtterance(
-                    index="utterance-1",
-                    step=0,
-                    prefix="Hello",
-                    prediction="world",
-                    done=True,
-                    ground_truth=None  # No ground truth
-                )
-            ]
+            "test-miner-1": {
+                "dialogue-456": [
+                    BBPredictedUtterance(
+                        index="utterance-1",
+                        step=0,
+                        prefix="Hello",
+                        prediction="world",
+                        done=True,
+                        ground_truth=None  # No ground truth
+                    )
+                ]
+            }
         }
-        
-        evaluated_utterances = [
-            BBPredictedUtterance(
-                index="utterance-1",
-                step=0,
-                prefix="Hello", 
-                prediction="world",
-                done=True,
-                ground_truth=None,
-                evaluation=BBUtteranceEvaluation(
-                    lexical_similarity=0.0,
-                    semantic_similarity=0.0,
-                    earliness=0.0,
-                    u_step=0.0
-                )
-            )
-        ]
-        
-        # No DialogueScore structure used now
         
         with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
              patch('babelbit.cli.runner.get_current_challenge_uid', new_callable=AsyncMock, return_value="challenge-123") as mock_get_challenge, \
              patch('babelbit.cli.runner.get_miners_from_registry', new_callable=AsyncMock) as mock_get_miners, \
-             patch('babelbit.cli.runner.predict_with_utterance_engine', new_callable=AsyncMock) as mock_predict, \
+             patch('babelbit.cli.runner.predict_with_utterance_engine_multi_miner', new_callable=AsyncMock) as mock_predict, \
+             patch('babelbit.cli.runner.init_utterance_auth') as mock_init_auth, \
+             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock) as mock_auth, \
              patch('babelbit.cli.runner.close_http_clients') as mock_close_clients:
             
             # Setup mocks
@@ -335,7 +327,7 @@ class TestRunner:
             with patch.dict('os.environ', {'BB_OUTPUT_LOGS_DIR': temp_logs_dir}):
                 await runner(output_dir=temp_scores_dir)
             
-            # Verify evaluate was called with None ground_truth
+            # Verify predict was called
             mock_predict.assert_called_once()
 
     @pytest.mark.asyncio
@@ -352,7 +344,9 @@ class TestRunner:
         with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
              patch('babelbit.cli.runner.get_current_challenge_uid', new_callable=AsyncMock, return_value="challenge-123") as mock_get_challenge, \
              patch('babelbit.cli.runner.get_miners_from_registry', new_callable=AsyncMock) as mock_get_miners, \
-             patch('babelbit.cli.runner.predict_with_utterance_engine', new_callable=AsyncMock) as mock_predict, \
+             patch('babelbit.cli.runner.predict_with_utterance_engine_multi_miner', new_callable=AsyncMock) as mock_predict, \
+             patch('babelbit.cli.runner.init_utterance_auth') as mock_init_auth, \
+             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock) as mock_auth, \
              patch('babelbit.cli.runner.close_http_clients') as mock_close_clients:
             # Challenge logger not used in file scorer mode
             
@@ -364,8 +358,10 @@ class TestRunner:
             with patch.dict('os.environ', {'BB_OUTPUT_LOGS_DIR': temp_logs_dir}):
                 await runner(output_dir=temp_scores_dir)
             
-            # Verify only 2 miners were processed (due to MAX_MINERS=2)
-            assert mock_predict.call_count == 2
+            # Verify the multi_miner function was called once, but with only 2 miners
+            assert mock_predict.call_count == 1
+            call_kwargs = mock_predict.call_args[1]
+            assert len(call_kwargs['miners']) == 2  # Only 2 miners passed due to MAX_MINERS=2
             # no evaluation assertions
 
 
@@ -373,23 +369,28 @@ class TestRunner:
 async def test_runner_integration(mock_settings, temp_logs_dir, temp_scores_dir):
     """Integration test with minimal mocking (ensures runner executes with patches)."""
     mock_miner = Miner(uid=1, hotkey="test_hotkey", model="test/model", revision="main", slug="test-slug", chute_id="test-chute", block=100)
+    # Multi-miner format: {miner_slug: {dialogue_uid: [utterances]}}
     mock_dialogues = {
-        "dialogue-int": [
-            BBPredictedUtterance(
-                index="utt-1",
-                step=0,
-                prefix="Hello",
-                prediction="world",
-                done=True,
-                ground_truth="Hello world EOF"
-            )
-        ]
+        "test-slug": {
+            "dialogue-int": [
+                BBPredictedUtterance(
+                    index="utt-1",
+                    step=0,
+                    prefix="Hello",
+                    prediction="world",
+                    done=True,
+                    ground_truth="Hello world EOF"
+                )
+            ]
+        }
     }
 
     with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
          patch('babelbit.cli.runner.get_current_challenge_uid', new_callable=AsyncMock, return_value="challenge-int") as mock_get_challenge, \
          patch('babelbit.cli.runner.get_miners_from_registry', new_callable=AsyncMock, return_value={1: mock_miner}) as mock_get_miners, \
-         patch('babelbit.cli.runner.predict_with_utterance_engine', new_callable=AsyncMock, return_value=mock_dialogues) as mock_predict, \
+         patch('babelbit.cli.runner.predict_with_utterance_engine_multi_miner', new_callable=AsyncMock, return_value=mock_dialogues) as mock_predict, \
+         patch('babelbit.cli.runner.init_utterance_auth') as mock_init_auth, \
+         patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock) as mock_auth, \
          patch('babelbit.cli.runner.close_http_clients'):
         with patch.dict('os.environ', {'BB_OUTPUT_LOGS_DIR': temp_logs_dir}):
             await runner(output_dir=temp_scores_dir)
@@ -397,7 +398,49 @@ async def test_runner_integration(mock_settings, temp_logs_dir, temp_scores_dir)
         mock_predict.assert_called_once()
 
 
+@pytest.mark.asyncio
+async def test_runner_score_jsonl_unavailable(mock_settings, temp_logs_dir, temp_scores_dir):
+    """Test runner behavior when score_jsonl module is unavailable"""
+    mock_miner = Miner(uid=1, hotkey="test_hotkey", model="test/model", revision="main", slug="test-slug", chute_id="test-chute", block=100)
+    mock_dialogues = {
+        "test-slug": {
+            "dialogue-score-unavail": [
+                BBPredictedUtterance(
+                    index="utt-1",
+                    step=0,
+                    prefix="Hello",
+                    prediction="world",
+                    done=True,
+                    ground_truth="Hello world EOF"
+                )
+            ]
+        }
+    }
 
+    with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
+         patch('babelbit.cli.runner.get_current_challenge_uid', new_callable=AsyncMock, return_value="challenge-no-scorer") as mock_get_challenge, \
+         patch('babelbit.cli.runner.get_miners_from_registry', new_callable=AsyncMock, return_value={1: mock_miner}) as mock_get_miners, \
+         patch('babelbit.cli.runner.predict_with_utterance_engine_multi_miner', new_callable=AsyncMock, return_value=mock_dialogues) as mock_predict, \
+         patch('babelbit.cli.runner.init_utterance_auth') as mock_init_auth, \
+         patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock) as mock_auth, \
+         patch('babelbit.cli.runner.score_jsonl', None), \
+         patch('babelbit.cli.runner.close_http_clients'):
+        
+        with patch.dict('os.environ', {'BB_OUTPUT_LOGS_DIR': temp_logs_dir}):
+            await runner(output_dir=temp_scores_dir)
+        
+        # Should complete without errors but skip scoring
+        mock_predict.assert_called_once()
+        
+        # Verify JSONL was written for our specific challenge
+        logs_dir = Path(temp_logs_dir)
+        our_jsonl_files = list(logs_dir.glob("dialogue_run_challenge-no-scorer_*.jsonl"))
+        assert len(our_jsonl_files) == 1, f"Expected 1 JSONL file for challenge-no-scorer, found {len(our_jsonl_files)}"
+        
+        # No score files should be created when score_jsonl is None
+        scores_dir = Path(temp_scores_dir)
+        our_score_files = list(scores_dir.glob("dialogue_run_challenge-no-scorer_*-score.json"))
+        assert len(our_score_files) == 0, f"Expected 0 score files when scorer unavailable, found {len(our_score_files)}"
 
 
 if __name__ == "__main__":

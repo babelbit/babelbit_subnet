@@ -22,6 +22,7 @@ async def _set_weights_with_confirmation(
 ) -> bool:
     """"""
     for attempt in range(retries):
+        st = None
         try:
             st = await get_subtensor()
             ref_block = await st.get_current_block()
@@ -78,7 +79,7 @@ async def _set_weights_with_confirmation(
                 e,
             )
             # Reset stale connection on error
-            reset_subtensor()
+            await reset_subtensor()
         await asyncio.sleep(delay_s)
     return False
 
@@ -218,6 +219,6 @@ async def run_signer() -> None:
     finally:
         # Cleanup on shutdown
         logger.info("Shutting down signer...")
-        reset_subtensor()  # Close subtensor connection
+        await reset_subtensor()  # Close subtensor connection
         await runner.cleanup()
         logger.info("Signer shutdown complete")

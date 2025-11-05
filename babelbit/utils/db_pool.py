@@ -185,14 +185,6 @@ def _ensure_utc(dt: datetime) -> datetime:
         # Convert to UTC and make it naive for DB storage
         return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
-async def insert_json_staging(*, file_content: dict, file_path: str, json_created_at: datetime) -> int:
-    sql = """
-        INSERT INTO public.json_staging (file_content, file_path, json_created_at)
-        VALUES ($1, $2, $3)
-        RETURNING id
-    """
-    return await db_pool.fetchval(sql, json.dumps(file_content, cls=DateTimeEncoder), file_path, _ensure_utc(json_created_at))
-
 async def insert_scoring_staging(*, file_content: dict, file_path: str, json_created_at: datetime) -> int:
     sql = """
         INSERT INTO public.scoring_staging (file_content, file_path, json_created_at)
