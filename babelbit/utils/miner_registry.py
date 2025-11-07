@@ -1,7 +1,7 @@
 from __future__ import annotations
 import os, json, time, asyncio, requests, logging
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 from huggingface_hub import HfApi
@@ -115,6 +115,8 @@ async def get_miners_from_registry(netuid: int, subtensor=None) -> Dict[int, Min
     logger = logging.getLogger(__name__)
     logger.info(f"Checking {len(meta.hotkeys)} hotkeys for commitments")
     logger.info(f"Available commitments for hotkeys: {list(commits.keys())}")
+
+    seen_slugs: Dict[str, tuple[int, int]] = {}
     
     for uid, hk in enumerate(meta.hotkeys):
         arr = commits.get(hk)
@@ -137,16 +139,39 @@ async def get_miners_from_registry(netuid: int, subtensor=None) -> Dict[int, Min
         if not slug:
             # no slug -> cannot call this miner
             continue
+        
+        block = int(block or 0) if uid != 0 else 0  # mirror special-case for uid 0
 
-        candidates[uid] = Miner(
-            uid=uid,
-            hotkey=hk,
-            model=model,
-            revision=revision,
-            slug=slug,
-            chute_id=chute_id,
-            block=int(block or 0) if uid != 0 else 0,  # mirror special-case for uid 0
-        )
+        # Slug deduplication: keep earliest block per slug
+        if slug not in seen_slugs:
+            seen_slugs[slug] = (uid, block)
+            # Add this miner since it's the first with this slug
+            candidates[uid] = Miner(
+                uid=uid,
+                hotkey=hk,
+                model=model,
+                revision=revision,
+                slug=slug,
+                chute_id=chute_id,
+                block=block, 
+            )
+        elif seen_slugs[slug][1] > block:
+            # This miner has an earlier block, replace the previous one
+            candidates.pop(seen_slugs[slug][0], None)
+            logger.warning(
+                f"Slug deduplication: eliminating UID {seen_slugs[slug][0]} with duplicate slug '{slug}'"
+            )
+            seen_slugs[slug] = (uid, block)
+            candidates[uid] = Miner(
+                uid=uid,
+                hotkey=hk,
+                model=model,
+                revision=revision,
+                slug=slug,
+                chute_id=chute_id,
+                block=block, 
+            )
+        # else: current miner has later block, skip it
 
     if not candidates:
         return {}
@@ -193,4 +218,5 @@ async def get_miners_from_registry(netuid: int, subtensor=None) -> Dict[int, Min
             best_by_model[m.model] = (blk, uid)
 
     keep_uids = {uid for _, uid in best_by_model.values()}
+
     return {uid: filtered[uid] for uid in keep_uids if uid in filtered}

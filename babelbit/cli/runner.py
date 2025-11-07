@@ -288,23 +288,23 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
                             # Insert scoring staging doc
                             try:
                                 now_utc = datetime.now(timezone.utc)
-                                scoring_staging_id = await insert_scoring_staging(
+                                staging_id = await insert_scoring_staging(
                                     file_content=scored_doc,
                                     file_path=str(score_path),
                                     json_created_at=now_utc,
                                 )
                             except Exception as e:
                                 logger.warning("Failed to insert scoring_staging row: %s", e)
-                                scoring_staging_id = None
+                                staging_id = None
                             # Prepare per-utterance rows -> scoring_submissions_bulk
-                            if scoring_staging_id is not None:
+                            if staging_id is not None:
                                 try:
                                     rows = []
                                     dialogue_average = scored_doc.get("dialogue_summary", {}).get("average_U_best_early")
                                     now_ts = datetime.now(timezone.utc)
                                     for utt in scored_doc.get("utterances", []):
                                         rows.append({
-                                            "scoring_staging_id": scoring_staging_id,
+                                            "scoring_staging_id": staging_id,
                                             "challenge_uid": challenge_uid,
                                             "dialogue_uid": dialogue_uid,
                                             "miner_uid": getattr(m, 'uid', None),
@@ -396,6 +396,13 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
         logger.error(f"Runner failed: {type(e).__name__}: {e}", exc_info=True)
     finally:
         close_http_clients()
+        # Cleanup DB pool if it was initialized
+        if db_ready:
+            try:
+                await db_pool.close()
+                logger.info("DB pool closed after runner execution")
+            except Exception as e:
+                logger.warning("Failed to close DB pool: %s", e)
     # Outputs persisted separately: raw logs in logs_dir, scores in scores_dir
 
 
@@ -412,103 +419,115 @@ async def runner_loop():
     last_successful_run = 0
     consecutive_failures = 0
 
-    while True:
-        try:
-            if st is None:
-                logger.info(f"[RunnerLoop] Attempting to connect to subtensor (attempt {consecutive_failures + 1}/{MAX_SUBTENSOR_RETRIES})...")
-                try:
-                    await reset_subtensor()  # Clear any stale cached connection
-                    st = await asyncio.wait_for(get_subtensor(), timeout=60)
-                    logger.info("[RunnerLoop] Successfully created subtensor connection")
-                    
-                    # Test the connection by fetching a block
-                    test_block = await asyncio.wait_for(st.get_current_block(), timeout=30)
-                    logger.info(f"[RunnerLoop] Connection verified at block {test_block}")
-                    
-                except asyncio.TimeoutError as te:
-                    st = None  # Clear invalid connection
-                    await reset_subtensor()  # Also clear the global cache
-                    raise TimeoutError(f"Subtensor initialization timed out: {te}")
-                except Exception as e:
-                    st = None  # Clear invalid connection
-                    await reset_subtensor()  # Also clear the global cache
-                    logger.error(f"[RunnerLoop] Subtensor connection failed: {type(e).__name__}: {e}", exc_info=True)
-                    raise
-
-            # Try to get current block for tempo-based scheduling
-            should_run = False
-            block = None
-            use_time_fallback = False
-            
+    try:
+        while True:
             try:
-                block = await asyncio.wait_for(st.get_current_block(), timeout=30)
-                logger.debug(f"[RunnerLoop] Current block: {block}")
-                
-                # run immediately on startup if configured
-                if (settings.BB_RUNNER_ON_STARTUP and last_successful_run == 0) or (block > last_block and block % TEMPO == 0):
-                    should_run = True
-                    logger.info(f"[RunnerLoop] Triggering runner at block {block}")
-                else:
-                    await st.wait_for_block()
-                    continue
-                    
-            except Exception as e:
-                # Block fetch failed - fall back to time-based scheduling
-                logger.warning(f"[RunnerLoop] Block fetch failed: {type(e).__name__}: {e}")
-                st = None  # Force reconnection on next iteration
-                await reset_subtensor()  # Clear the global cached connection
-                
-                time_elapsed = time.time() - last_successful_run
-                expected_interval = TEMPO * 12  # TEMPO blocks * ~12 seconds per block
-                
-                if last_successful_run > 0 and time_elapsed >= expected_interval:
-                    should_run = True
-                    use_time_fallback = True
-                    logger.warning(
-                        f"[RunnerLoop] Blockchain unreachable. Using time-based fallback: "
-                        f"elapsed={time_elapsed:.0f}s, expected={expected_interval:.0f}s"
-                    )
-                else:
-                    # Not enough time has passed, or first run - skip and let retry logic handle it
-                    if last_successful_run == 0:
-                        logger.info("[RunnerLoop] First run - will retry connection")
-                    else:
-                        logger.info(f"[RunnerLoop] Only {time_elapsed:.0f}s elapsed (need {expected_interval:.0f}s), will retry")
-                    raise  # Re-raise to trigger retry logic
-                    
-            if should_run:
-                if use_time_fallback:
-                    logger.info("[RunnerLoop] Running validation via time-based fallback (blockchain unreachable)")
-                
-                await runner(subtensor=st if st is not None else None)
-                
-                if block is not None:
-                    last_block = block
-                last_successful_run = time.time()
-                consecutive_failures = 0  # Reset after successful validation cycle
+                if st is None:
+                    logger.info(f"[RunnerLoop] Attempting to connect to subtensor (attempt {consecutive_failures + 1}/{MAX_SUBTENSOR_RETRIES})...")
+                    try:
+                        await reset_subtensor()  # Clear any stale cached connection
+                        st = await asyncio.wait_for(get_subtensor(), timeout=60)
+                        logger.info("[RunnerLoop] Successfully created subtensor connection")
+                        
+                        # Test the connection by fetching a block
+                        test_block = await asyncio.wait_for(st.get_current_block(), timeout=30)
+                        logger.info(f"[RunnerLoop] Connection verified at block {test_block}")
+                        
+                    except asyncio.TimeoutError as te:
+                        st = None  # Clear invalid connection
+                        await reset_subtensor()  # Also clear the global cache
+                        raise TimeoutError(f"Subtensor initialization timed out: {te}")
+                    except Exception as e:
+                        st = None  # Clear invalid connection
+                        await reset_subtensor()  # Also clear the global cache
+                        logger.error(f"[RunnerLoop] Subtensor connection failed: {type(e).__name__}: {e}", exc_info=True)
+                        raise
 
-        except asyncio.CancelledError:
-            break
+                # Try to get current block for tempo-based scheduling
+                should_run = False
+                block = None
+                use_time_fallback = False
+                
+                try:
+                    block = await asyncio.wait_for(st.get_current_block(), timeout=30)
+                    logger.debug(f"[RunnerLoop] Current block: {block}")
+                    
+                    # run immediately on startup if configured
+                    if (settings.BB_RUNNER_ON_STARTUP and last_successful_run == 0) or (block > last_block and block % TEMPO == 0):
+                        should_run = True
+                        logger.info(f"[RunnerLoop] Triggering runner at block {block}")
+                    else:
+                        await st.wait_for_block()
+                        continue
+                        
+                except Exception as e:
+                    # Block fetch failed - fall back to time-based scheduling
+                    logger.warning(f"[RunnerLoop] Block fetch failed: {type(e).__name__}: {e}")
+                    st = None  # Force reconnection on next iteration
+                    await reset_subtensor()  # Clear the global cached connection
+                    
+                    time_elapsed = time.time() - last_successful_run
+                    expected_interval = TEMPO * 12  # TEMPO blocks * ~12 seconds per block
+                    
+                    if last_successful_run > 0 and time_elapsed >= expected_interval:
+                        should_run = True
+                        use_time_fallback = True
+                        logger.warning(
+                            f"[RunnerLoop] Blockchain unreachable. Using time-based fallback: "
+                            f"elapsed={time_elapsed:.0f}s, expected={expected_interval:.0f}s"
+                        )
+                    else:
+                        # Not enough time has passed, or first run - skip and let retry logic handle it
+                        if last_successful_run == 0:
+                            logger.info("[RunnerLoop] First run - will retry connection")
+                        else:
+                            logger.info(f"[RunnerLoop] Only {time_elapsed:.0f}s elapsed (need {expected_interval:.0f}s), will retry")
+                        raise  # Re-raise to trigger retry logic
+                        
+                if should_run:
+                    if use_time_fallback:
+                        logger.info("[RunnerLoop] Running validation via time-based fallback (blockchain unreachable)")
+                    
+                    await runner(subtensor=st if st is not None else None)
+                    
+                    if block is not None:
+                        last_block = block
+                    last_successful_run = time.time()
+                    consecutive_failures = 0  # Reset after successful validation cycle
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                consecutive_failures += 1
+                logger.warning(
+                    f"[RunnerLoop] Error (attempt {consecutive_failures}/{MAX_SUBTENSOR_RETRIES}): {type(e).__name__}: {e}"
+                )
+                
+                if consecutive_failures >= MAX_SUBTENSOR_RETRIES:
+                    logger.error(
+                        f"[RunnerLoop] Max retries ({MAX_SUBTENSOR_RETRIES}) exceeded. "
+                        f"Endpoints: primary={settings.BITTENSOR_SUBTENSOR_ENDPOINT}, "
+                        f"fallback={settings.BITTENSOR_SUBTENSOR_FALLBACK}"
+                    )
+                    logger.error(
+                        "[RunnerLoop] Unable to connect to Bittensor network. "
+                        "Sleeping for 5 minutes before retry cycle..."
+                    )
+                    consecutive_failures = 0  # Reset counter
+                    st = None
+                    await asyncio.sleep(300)  # Sleep 5 minutes before trying again
+                else:
+                    logger.info(f"[RunnerLoop] Retrying in 120 seconds...")
+                    st = None
+                    await asyncio.sleep(120)
+    finally:
+        # Ensure cleanup on exit
+        logger.info("[RunnerLoop] Shutting down, cleaning up resources...")
+        close_http_clients()
+        # Close DB pool if it exists
+        try:
+            await db_pool.close()
+            logger.info("[RunnerLoop] DB pool closed")
         except Exception as e:
-            consecutive_failures += 1
-            logger.warning(
-                f"[RunnerLoop] Error (attempt {consecutive_failures}/{MAX_SUBTENSOR_RETRIES}): {type(e).__name__}: {e}"
-            )
-            
-            if consecutive_failures >= MAX_SUBTENSOR_RETRIES:
-                logger.error(
-                    f"[RunnerLoop] Max retries ({MAX_SUBTENSOR_RETRIES}) exceeded. "
-                    f"Endpoints: primary={settings.BITTENSOR_SUBTENSOR_ENDPOINT}, "
-                    f"fallback={settings.BITTENSOR_SUBTENSOR_FALLBACK}"
-                )
-                logger.error(
-                    "[RunnerLoop] Unable to connect to Bittensor network. "
-                    "Sleeping for 5 minutes before retry cycle..."
-                )
-                consecutive_failures = 0  # Reset counter
-                st = None
-                await asyncio.sleep(300)  # Sleep 5 minutes before trying again
-            else:
-                logger.info(f"[RunnerLoop] Retrying in 120 seconds...")
-                st = None
-                await asyncio.sleep(120)
+            logger.warning(f"[RunnerLoop] Error closing DB pool: {e}")
+

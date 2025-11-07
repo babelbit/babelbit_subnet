@@ -93,6 +93,9 @@ async def run_signer() -> None:
     cold = settings.BITTENSOR_WALLET_COLD
     hot = settings.BITTENSOR_WALLET_HOT
     wallet = bt.wallet(name=cold, hotkey=hot)
+    
+    # Track operations for periodic cleanup (memory leak mitigation)
+    operation_count = {"set_weights": 0, "total": 0}
 
     @web.middleware
     async def access_log(request: web.Request, handler):
@@ -134,6 +137,7 @@ async def run_signer() -> None:
 
     async def set_weights_handler(req: web.Request):
         """"""
+        nonlocal operation_count
         try:
             payload = await req.json()
             netuid = int(payload.get("netuid", NETUID))
@@ -177,6 +181,23 @@ async def run_signer() -> None:
                 delay_s=float(os.getenv("SIGNER_RETRY_DELAY", "2")),
                 log_prefix="[signer]",
             )
+            
+            # Memory leak mitigation: periodically reset subtensor connection
+            # to prevent accumulation of internal buffers/state in bittensor
+            operation_count["set_weights"] += 1
+            operation_count["total"] += 1
+            reset_interval = int(os.getenv("SIGNER_SUBTENSOR_RESET_INTERVAL", "100"))
+            if operation_count["set_weights"] >= reset_interval:
+                logger.info(
+                    "[signer] Resetting subtensor connection after %d set_weights operations (memory leak mitigation)",
+                    operation_count["set_weights"]
+                )
+                await reset_subtensor()
+                operation_count["set_weights"] = 0
+                # Force garbage collection to clean up accumulated objects
+                import gc
+                gc.collect()
+            
             return web.json_response(
                 (
                     {"success": True}
