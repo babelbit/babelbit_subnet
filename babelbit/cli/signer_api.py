@@ -2,12 +2,80 @@ import os, time, socket, asyncio, logging
 from aiohttp import web
 import bittensor as bt
 
-from babelbit.utils.bittensor_helpers import get_subtensor, reset_subtensor
 from babelbit.utils.settings import get_settings
 
 logger = logging.getLogger("sv-signer")
 
 NETUID = int(os.getenv("BABELBIT_NETUID", "59"))
+
+# Local subtensor management for the signer service
+_signer_subtensor = None
+_signer_subtensor_lock = asyncio.Lock()
+_signer_subtensor_created_at = None
+
+
+async def _get_local_subtensor():
+    """Get or create a subtensor connection local to this signer service."""
+    global _signer_subtensor, _signer_subtensor_created_at
+    async with _signer_subtensor_lock:
+        if _signer_subtensor is None:
+            settings = get_settings()
+            logger.info("[signer] 🔗 Initializing local subtensor: %s", settings.BITTENSOR_SUBTENSOR_ENDPOINT)
+            _signer_subtensor = bt.async_subtensor(settings.BITTENSOR_SUBTENSOR_ENDPOINT)
+            try:
+                await _signer_subtensor.initialize()
+                _signer_subtensor_created_at = time.monotonic()
+                logger.info("[signer] ✅ Subtensor initialized: %s", settings.BITTENSOR_SUBTENSOR_ENDPOINT)
+            except Exception as e:
+                logger.error("[signer] ❌ Primary connection failed: %s", e)
+                logger.info("[signer] 🔄 Trying fallback: %s", settings.BITTENSOR_SUBTENSOR_FALLBACK)
+                _signer_subtensor = bt.async_subtensor(settings.BITTENSOR_SUBTENSOR_FALLBACK)
+                await _signer_subtensor.initialize()
+                _signer_subtensor_created_at = time.monotonic()
+                logger.info("[signer] ✅ Fallback subtensor initialized: %s", settings.BITTENSOR_SUBTENSOR_FALLBACK)
+        return _signer_subtensor
+
+
+async def _reset_local_subtensor():
+    """Close and reset the local subtensor connection."""
+    global _signer_subtensor, _signer_subtensor_created_at
+    async with _signer_subtensor_lock:
+        if _signer_subtensor is not None:
+            try:
+                await _signer_subtensor.close()
+                logger.info("[signer] 🔄 Subtensor connection closed")
+            except Exception as e:
+                logger.warning("[signer] ⚠️  Error closing subtensor: %s", e)
+            _signer_subtensor = None
+            _signer_subtensor_created_at = None
+            logger.info("[signer] 🔄 Subtensor connection reset")
+
+
+async def _should_reset_subtensor(operation_count: dict) -> bool:
+    """
+    Determine if subtensor should be reset based on operation count or age.
+    Returns True if reset is needed.
+    """
+    global _signer_subtensor_created_at
+    
+    # Check operation count
+    reset_interval = int(os.getenv("SIGNER_SUBTENSOR_RESET_INTERVAL", "50"))
+    if operation_count["set_weights"] >= reset_interval:
+        return True
+    
+    # Check age of connection (default: reset every 30 minutes)
+    max_age_seconds = int(os.getenv("SIGNER_SUBTENSOR_MAX_AGE_SECONDS", "1800"))
+    if _signer_subtensor_created_at is not None:
+        age = time.monotonic() - _signer_subtensor_created_at
+        if age >= max_age_seconds:
+            logger.info(
+                "[signer] Subtensor connection age: %.1f seconds (max: %d)",
+                age,
+                max_age_seconds
+            )
+            return True
+    
+    return False
 
 
 async def _set_weights_with_confirmation(
@@ -20,11 +88,11 @@ async def _set_weights_with_confirmation(
     delay_s: float = 2.0,
     log_prefix: str = "[signer]",
 ) -> bool:
-    """"""
+    """Set weights with confirmation, using local subtensor instance."""
     for attempt in range(retries):
         st = None
         try:
-            st = await get_subtensor()
+            st = await _get_local_subtensor()
             ref_block = await st.get_current_block()
 
             # extrinsic
@@ -79,7 +147,7 @@ async def _set_weights_with_confirmation(
                 e,
             )
             # Reset stale connection on error
-            await reset_subtensor()
+            await _reset_local_subtensor()
         await asyncio.sleep(delay_s)
     return False
 
@@ -186,13 +254,13 @@ async def run_signer() -> None:
             # to prevent accumulation of internal buffers/state in bittensor
             operation_count["set_weights"] += 1
             operation_count["total"] += 1
-            reset_interval = int(os.getenv("SIGNER_SUBTENSOR_RESET_INTERVAL", "100"))
-            if operation_count["set_weights"] >= reset_interval:
+            
+            if await _should_reset_subtensor(operation_count):
                 logger.info(
                     "[signer] Resetting subtensor connection after %d set_weights operations (memory leak mitigation)",
                     operation_count["set_weights"]
                 )
-                await reset_subtensor()
+                await _reset_local_subtensor()
                 operation_count["set_weights"] = 0
                 # Force garbage collection to clean up accumulated objects
                 import gc
@@ -240,6 +308,6 @@ async def run_signer() -> None:
     finally:
         # Cleanup on shutdown
         logger.info("Shutting down signer...")
-        await reset_subtensor()  # Close subtensor connection
+        await _reset_local_subtensor()  # Close subtensor connection
         await runner.cleanup()
         logger.info("Signer shutdown complete")

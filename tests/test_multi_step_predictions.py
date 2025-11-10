@@ -325,8 +325,11 @@ class TestMinerIdentifiersInDatabase:
             mock_db_pool.init = AsyncMock()
             mock_db_pool.is_ready.return_value = True
             
-            # Run the function
-            with patch.dict('os.environ', {'BB_OUTPUT_LOGS_DIR': temp_test_dir['logs']}):
+            # Run the function with DB writes enabled
+            with patch.dict('os.environ', {
+                'BB_OUTPUT_LOGS_DIR': temp_test_dir['logs'],
+                'BB_ENABLE_DB_WRITES': '1'
+            }):
                 await runner(output_dir=temp_test_dir['scores'])
             
             # Print the score summary from the generated file
@@ -403,8 +406,11 @@ class TestMinerIdentifiersInDatabase:
             mock_db_pool.init = AsyncMock()
             mock_db_pool.is_ready.return_value = True
             
-            # Run the function
-            with patch.dict('os.environ', {'BB_OUTPUT_LOGS_DIR': temp_test_dir['logs']}):
+            # Run the function with DB writes enabled
+            with patch.dict('os.environ', {
+                'BB_OUTPUT_LOGS_DIR': temp_test_dir['logs'],
+                'BB_ENABLE_DB_WRITES': '1'
+            }):
                 await runner(output_dir=temp_test_dir['scores'])
             
             # Verify we have rows for both miners

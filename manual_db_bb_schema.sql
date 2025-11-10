@@ -51,6 +51,8 @@ DROP SCHEMA IF EXISTS public;
 -- Name: public; Type: SCHEMA; Schema: -; Owner: pg_database_owner
 --
 
+CREATE SCHEMA IF NOT EXISTS public;
+
 ALTER SCHEMA public OWNER TO pg_database_owner;
 
 --
@@ -62,7 +64,7 @@ ALTER SCHEMA public OWNER TO pg_database_owner;
 COMMENT ON SCHEMA public IS 'standard public schema';
 --
 -- TOC entry 237 (class 1255 OID 16591)
--- Name: process_challenge_staging(timestamp without time zone); Type: PROCEDURE; Schema: public; Owner: doadmin
+-- Name: process_challenge_staging(timestamp without time zone); Type: PROCEDURE; Schema: public; Owner: babelbit
 --
 
 CREATE PROCEDURE public.process_challenge_staging(IN start_date timestamp without time zone DEFAULT NULL::timestamp without time zone)
@@ -92,11 +94,11 @@ BEGIN
 END;
 $$;
 
-ALTER PROCEDURE public.process_challenge_staging(IN start_date timestamp without time zone) OWNER TO doadmin;
+ALTER PROCEDURE public.process_challenge_staging(IN start_date timestamp without time zone) OWNER TO babelbit;
 
 --
 -- TOC entry 236 (class 1255 OID 16525)
--- Name: process_json_staging(timestamp without time zone); Type: PROCEDURE; Schema: public; Owner: doadmin
+-- Name: process_json_staging(timestamp without time zone); Type: PROCEDURE; Schema: public; Owner: babelbit
 --
 
 CREATE PROCEDURE public.process_json_staging(IN start_date timestamp without time zone DEFAULT NULL::timestamp without time zone)
@@ -130,10 +132,10 @@ BEGIN
 END;
 $$;
 
-ALTER PROCEDURE public.process_json_staging(IN start_date timestamp without time zone) OWNER TO doadmin;
+ALTER PROCEDURE public.process_json_staging(IN start_date timestamp without time zone) OWNER TO babelbit;
 --
 -- TOC entry 238 (class 1255 OID 16592)
--- Name: process_scoring_staging(timestamp without time zone); Type: PROCEDURE; Schema: public; Owner: doadmin
+-- Name: process_scoring_staging(timestamp without time zone); Type: PROCEDURE; Schema: public; Owner: babelbit
 --
 
 CREATE PROCEDURE public.process_scoring_staging(IN start_date timestamp without time zone DEFAULT NULL::timestamp without time zone)
@@ -168,7 +170,7 @@ BEGIN
 END;
 $$;
 
-ALTER PROCEDURE public.process_scoring_staging(IN start_date timestamp without time zone) OWNER TO doadmin;
+ALTER PROCEDURE public.process_scoring_staging(IN start_date timestamp without time zone) OWNER TO babelbit;
 
 SET default_tablespace = '';
 
@@ -176,7 +178,7 @@ SET default_table_access_method = heap;
 
 --
 -- TOC entry 222 (class 1259 OID 16774)
--- Name: challenge_staging; Type: TABLE; Schema: public; Owner: doadmin
+-- Name: challenge_staging; Type: TABLE; Schema: public; Owner: babelbit
 --
 
 CREATE TABLE public.challenge_staging (
@@ -187,11 +189,11 @@ CREATE TABLE public.challenge_staging (
     staging_inserted_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
 );
 
-ALTER TABLE public.challenge_staging OWNER TO doadmin;
+ALTER TABLE public.challenge_staging OWNER TO babelbit;
 
 --
 -- TOC entry 221 (class 1259 OID 16773)
--- Name: challenge_staging_id_seq; Type: SEQUENCE; Schema: public; Owner: doadmin
+-- Name: challenge_staging_id_seq; Type: SEQUENCE; Schema: public; Owner: babelbit
 --
 
 CREATE SEQUENCE public.challenge_staging_id_seq
@@ -201,19 +203,19 @@ CREATE SEQUENCE public.challenge_staging_id_seq
     NO MAXVALUE
     CACHE 1;
 
-ALTER SEQUENCE public.challenge_staging_id_seq OWNER TO doadmin;
+ALTER SEQUENCE public.challenge_staging_id_seq OWNER TO babelbit;
 
 --
 -- TOC entry 4480 (class 0 OID 0)
 -- Dependencies: 221
--- Name: challenge_staging_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: doadmin
+-- Name: challenge_staging_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: babelbit
 --
 
 ALTER SEQUENCE public.challenge_staging_id_seq OWNED BY public.challenge_staging.id;
 
 --
 -- TOC entry 224 (class 1259 OID 16784)
--- Name: challenges; Type: TABLE; Schema: public; Owner: doadmin
+-- Name: challenges; Type: TABLE; Schema: public; Owner: babelbit
 --
 
 CREATE TABLE public.challenges (
@@ -230,11 +232,11 @@ CREATE TABLE public.challenges (
     CONSTRAINT challenges_utterance_number_check CHECK ((utterance_number >= 0))
 );
 
-ALTER TABLE public.challenges OWNER TO doadmin;
+ALTER TABLE public.challenges OWNER TO babelbit;
 
 --
 -- TOC entry 223 (class 1259 OID 16783)
--- Name: challenges_id_seq; Type: SEQUENCE; Schema: public; Owner: doadmin
+-- Name: challenges_id_seq; Type: SEQUENCE; Schema: public; Owner: babelbit
 --
 
 CREATE SEQUENCE public.challenges_id_seq
@@ -244,19 +246,19 @@ CREATE SEQUENCE public.challenges_id_seq
     NO MAXVALUE
     CACHE 1;
 
-ALTER SEQUENCE public.challenges_id_seq OWNER TO doadmin;
+ALTER SEQUENCE public.challenges_id_seq OWNER TO babelbit;
 
 --
 -- TOC entry 4481 (class 0 OID 0)
 -- Dependencies: 223
--- Name: challenges_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: doadmin
+-- Name: challenges_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: babelbit
 --
 
 ALTER SEQUENCE public.challenges_id_seq OWNED BY public.challenges.id;
 
 --
 -- TOC entry 218 (class 1259 OID 16553)
--- Name: scoring_staging; Type: TABLE; Schema: public; Owner: doadmin
+-- Name: scoring_staging; Type: TABLE; Schema: public; Owner: babelbit
 --
 
 CREATE TABLE public.scoring_staging (
@@ -267,11 +269,11 @@ CREATE TABLE public.scoring_staging (
     staging_inserted_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
 );
 
-ALTER TABLE public.scoring_staging OWNER TO doadmin;
+ALTER TABLE public.scoring_staging OWNER TO babelbit;
 
 --
 -- TOC entry 217 (class 1259 OID 16552)
--- Name: scoring_staging_id_seq; Type: SEQUENCE; Schema: public; Owner: doadmin
+-- Name: scoring_staging_id_seq; Type: SEQUENCE; Schema: public; Owner: babelbit
 --
 
 CREATE SEQUENCE public.scoring_staging_id_seq
@@ -281,19 +283,19 @@ CREATE SEQUENCE public.scoring_staging_id_seq
     NO MAXVALUE
     CACHE 1;
 
-ALTER SEQUENCE public.scoring_staging_id_seq OWNER TO doadmin;
+ALTER SEQUENCE public.scoring_staging_id_seq OWNER TO babelbit;
 
 --
 -- TOC entry 4482 (class 0 OID 0)
 -- Dependencies: 217
--- Name: scoring_staging_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: doadmin
+-- Name: scoring_staging_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: babelbit
 --
 
 ALTER SEQUENCE public.scoring_staging_id_seq OWNED BY public.scoring_staging.id;
 
 --
 -- TOC entry 220 (class 1259 OID 16623)
--- Name: scoring_submissions; Type: TABLE; Schema: public; Owner: doadmin
+-- Name: scoring_submissions; Type: TABLE; Schema: public; Owner: babelbit
 --
 
 CREATE TABLE public.scoring_submissions (
@@ -320,11 +322,11 @@ CREATE TABLE public.scoring_submissions (
     CONSTRAINT scoring_submissions_utterance_number_check CHECK ((utterance_number >= 0))
 );
 
-ALTER TABLE public.scoring_submissions OWNER TO doadmin;
+ALTER TABLE public.scoring_submissions OWNER TO babelbit;
 
 --
 -- TOC entry 219 (class 1259 OID 16622)
--- Name: scoring_submissions_id_seq; Type: SEQUENCE; Schema: public; Owner: doadmin
+-- Name: scoring_submissions_id_seq; Type: SEQUENCE; Schema: public; Owner: babelbit
 --
 
 CREATE SEQUENCE public.scoring_submissions_id_seq
@@ -334,47 +336,47 @@ CREATE SEQUENCE public.scoring_submissions_id_seq
     NO MAXVALUE
     CACHE 1;
 
-ALTER SEQUENCE public.scoring_submissions_id_seq OWNER TO doadmin;
+ALTER SEQUENCE public.scoring_submissions_id_seq OWNER TO babelbit;
 
 --
 -- TOC entry 4483 (class 0 OID 0)
 -- Dependencies: 219
--- Name: scoring_submissions_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: doadmin
+-- Name: scoring_submissions_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: babelbit
 --
 
 ALTER SEQUENCE public.scoring_submissions_id_seq OWNED BY public.scoring_submissions.id;
 
 --
 -- TOC entry 4297 (class 2604 OID 16777)
--- Name: challenge_staging id; Type: DEFAULT; Schema: public; Owner: doadmin
+-- Name: challenge_staging id; Type: DEFAULT; Schema: public; Owner: babelbit
 --
 
 ALTER TABLE ONLY public.challenge_staging ALTER COLUMN id SET DEFAULT nextval('public.challenge_staging_id_seq'::regclass);
 
 --
 -- TOC entry 4299 (class 2604 OID 16787)
--- Name: challenges id; Type: DEFAULT; Schema: public; Owner: doadmin
+-- Name: challenges id; Type: DEFAULT; Schema: public; Owner: babelbit
 --
 
 ALTER TABLE ONLY public.challenges ALTER COLUMN id SET DEFAULT nextval('public.challenges_id_seq'::regclass);
 
 --
 -- TOC entry 4293 (class 2604 OID 16556)
--- Name: scoring_staging id; Type: DEFAULT; Schema: public; Owner: doadmin
+-- Name: scoring_staging id; Type: DEFAULT; Schema: public; Owner: babelbit
 --
 
 ALTER TABLE ONLY public.scoring_staging ALTER COLUMN id SET DEFAULT nextval('public.scoring_staging_id_seq'::regclass);
 
 --
 -- TOC entry 4295 (class 2604 OID 16626)
--- Name: scoring_submissions id; Type: DEFAULT; Schema: public; Owner: doadmin
+-- Name: scoring_submissions id; Type: DEFAULT; Schema: public; Owner: babelbit
 --
 
 ALTER TABLE ONLY public.scoring_submissions ALTER COLUMN id SET DEFAULT nextval('public.scoring_submissions_id_seq'::regclass);
 
 --
 -- TOC entry 4319 (class 2606 OID 16782)
--- Name: challenge_staging challenge_staging_pkey; Type: CONSTRAINT; Schema: public; Owner: doadmin
+-- Name: challenge_staging challenge_staging_pkey; Type: CONSTRAINT; Schema: public; Owner: babelbit
 --
 
 ALTER TABLE ONLY public.challenge_staging
@@ -382,7 +384,7 @@ ALTER TABLE ONLY public.challenge_staging
 
 --
 -- TOC entry 4321 (class 2606 OID 16793)
--- Name: challenges challenges_pkey; Type: CONSTRAINT; Schema: public; Owner: doadmin
+-- Name: challenges challenges_pkey; Type: CONSTRAINT; Schema: public; Owner: babelbit
 --
 
 ALTER TABLE ONLY public.challenges
@@ -391,7 +393,7 @@ ALTER TABLE ONLY public.challenges
 
 --
 -- TOC entry 4309 (class 2606 OID 16561)
--- Name: scoring_staging scoring_staging_pkey; Type: CONSTRAINT; Schema: public; Owner: doadmin
+-- Name: scoring_staging scoring_staging_pkey; Type: CONSTRAINT; Schema: public; Owner: babelbit
 --
 
 ALTER TABLE ONLY public.scoring_staging
@@ -400,7 +402,7 @@ ALTER TABLE ONLY public.scoring_staging
 
 --
 -- TOC entry 4317 (class 2606 OID 16637)
--- Name: scoring_submissions scoring_submissions_pkey; Type: CONSTRAINT; Schema: public; Owner: doadmin
+-- Name: scoring_submissions scoring_submissions_pkey; Type: CONSTRAINT; Schema: public; Owner: babelbit
 --
 
 ALTER TABLE ONLY public.scoring_submissions
@@ -408,7 +410,7 @@ ALTER TABLE ONLY public.scoring_submissions
 
 --
 -- TOC entry 4322 (class 1259 OID 16800)
--- Name: idx_challenges_challenge_uid; Type: INDEX; Schema: public; Owner: doadmin
+-- Name: idx_challenges_challenge_uid; Type: INDEX; Schema: public; Owner: babelbit
 --
 
 CREATE INDEX idx_challenges_challenge_uid ON public.challenges USING btree (challenge_uid);
@@ -416,77 +418,77 @@ CREATE INDEX idx_challenges_challenge_uid ON public.challenges USING btree (chal
 
 --
 -- TOC entry 4323 (class 1259 OID 16801)
--- Name: idx_challenges_dialogue_uid; Type: INDEX; Schema: public; Owner: doadmin
+-- Name: idx_challenges_dialogue_uid; Type: INDEX; Schema: public; Owner: babelbit
 --
 
 CREATE INDEX idx_challenges_dialogue_uid ON public.challenges USING btree (dialogue_uid);
 
 --
 -- TOC entry 4324 (class 1259 OID 16802)
--- Name: idx_challenges_language; Type: INDEX; Schema: public; Owner: doadmin
+-- Name: idx_challenges_language; Type: INDEX; Schema: public; Owner: babelbit
 --
 
 CREATE INDEX idx_challenges_language ON public.challenges USING btree (language);
 
 --
 -- TOC entry 4325 (class 1259 OID 16799)
--- Name: idx_challenges_staging_id; Type: INDEX; Schema: public; Owner: doadmin
+-- Name: idx_challenges_staging_id; Type: INDEX; Schema: public; Owner: babelbit
 --
 
 CREATE INDEX idx_challenges_staging_id ON public.challenges USING btree (staging_id);
 
 --
 -- TOC entry 4326 (class 1259 OID 16803)
--- Name: idx_challenges_utterance_number; Type: INDEX; Schema: public; Owner: doadmin
+-- Name: idx_challenges_utterance_number; Type: INDEX; Schema: public; Owner: babelbit
 --
 
 CREATE INDEX idx_challenges_utterance_number ON public.challenges USING btree (utterance_number);
 
 --
 -- TOC entry 4310 (class 1259 OID 16644)
--- Name: idx_scoring_submissions_challenge_uid; Type: INDEX; Schema: public; Owner: doadmin
+-- Name: idx_scoring_submissions_challenge_uid; Type: INDEX; Schema: public; Owner: babelbit
 --
 
 CREATE INDEX idx_scoring_submissions_challenge_uid ON public.scoring_submissions USING btree (challenge_uid);
 
 --
 -- TOC entry 4311 (class 1259 OID 16645)
--- Name: idx_scoring_submissions_dialogue_uid; Type: INDEX; Schema: public; Owner: doadmin
+-- Name: idx_scoring_submissions_dialogue_uid; Type: INDEX; Schema: public; Owner: babelbit
 --
 
 CREATE INDEX idx_scoring_submissions_dialogue_uid ON public.scoring_submissions USING btree (dialogue_uid);
 
 --
 -- TOC entry 4312 (class 1259 OID 16647)
--- Name: idx_scoring_submissions_miner_hotkey; Type: INDEX; Schema: public; Owner: doadmin
+-- Name: idx_scoring_submissions_miner_hotkey; Type: INDEX; Schema: public; Owner: babelbit
 --
 
 CREATE INDEX idx_scoring_submissions_miner_hotkey ON public.scoring_submissions USING btree (miner_hotkey);
 
 --
 -- TOC entry 4313 (class 1259 OID 16646)
--- Name: idx_scoring_submissions_miner_uid; Type: INDEX; Schema: public; Owner: doadmin
+-- Name: idx_scoring_submissions_miner_uid; Type: INDEX; Schema: public; Owner: babelbit
 --
 
 CREATE INDEX idx_scoring_submissions_miner_uid ON public.scoring_submissions USING btree (miner_uid);
 
 --
 -- TOC entry 4314 (class 1259 OID 16643)
--- Name: idx_scoring_submissions_staging_id; Type: INDEX; Schema: public; Owner: doadmin
+-- Name: idx_scoring_submissions_staging_id; Type: INDEX; Schema: public; Owner: babelbit
 --
 
 CREATE INDEX idx_scoring_submissions_staging_id ON public.scoring_submissions USING btree (scoring_staging_id);
 
 --
 -- TOC entry 4315 (class 1259 OID 16648)
--- Name: idx_scoring_submissions_utterance_number; Type: INDEX; Schema: public; Owner: doadmin
+-- Name: idx_scoring_submissions_utterance_number; Type: INDEX; Schema: public; Owner: babelbit
 --
 
 CREATE INDEX idx_scoring_submissions_utterance_number ON public.scoring_submissions USING btree (utterance_number);
 
 --
 -- TOC entry 4328 (class 2606 OID 16794)
--- Name: challenges challenges_staging_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: doadmin
+-- Name: challenges challenges_staging_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: babelbit
 --
 
 ALTER TABLE ONLY public.challenges
@@ -494,7 +496,7 @@ ALTER TABLE ONLY public.challenges
 
 --
 -- TOC entry 4327 (class 2606 OID 16638)
--- Name: scoring_submissions scoring_submissions_scoring_staging_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: doadmin
+-- Name: scoring_submissions scoring_submissions_scoring_staging_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: babelbit
 --
 
 ALTER TABLE ONLY public.scoring_submissions
