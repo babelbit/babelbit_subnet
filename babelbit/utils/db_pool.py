@@ -9,11 +9,11 @@ Design goals:
 - Resilient transient failure retry on connection acquisition
 
 Environment variables expected (fallbacks provided):
-  PG_HOST (default: localhost)
+  PG_HOST (default: db)
   PG_PORT (default: 5432)
-  PG_DB   (default: postgres)
-  PG_USER (default: postgres)
-  PG_PASSWORD (default: empty)
+  PG_DB   (default: babelbit)
+  PG_USER (default: babelbit)
+  PG_PASSWORD (default: babelbit)
   PG_MIN_CONN (default: 1)
   PG_MAX_CONN (default: 10)
 
@@ -59,11 +59,11 @@ class _PoolConfig:
     @classmethod
     def from_env(cls) -> "_PoolConfig":
         return cls(
-            host=os.getenv("PG_HOST", "localhost"),
+            host=os.getenv("PG_HOST", "db"),
             port=int(os.getenv("PG_PORT", "5432")),
-            user=os.getenv("PG_USER", "postgres"),
-            password=os.getenv("PG_PASSWORD", ""),
-            database=os.getenv("PG_DB", "postgres"),
+            user=os.getenv("PG_USER", "babelbit"),
+            password=os.getenv("PG_PASSWORD", "babelbit"),
+            database=os.getenv("PG_DB", "babelbit"),
             min_size=int(os.getenv("PG_MIN_CONN", "1")),
             max_size=int(os.getenv("PG_MAX_CONN", "10")),
             statement_cache_size=int(os.getenv("PG_STMT_CACHE", "0")),

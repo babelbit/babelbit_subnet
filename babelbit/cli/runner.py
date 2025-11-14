@@ -166,7 +166,10 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
             return
 
         # Define prediction callback for all miners
-        from babelbit.utils.predict_engine import call_miner_model_on_chutes
+        from babelbit.utils.predict_engine import call_miner_model_on_chutes, call_miner_axon_endpoint
+        
+        # Capture timeout value from settings before defining callback
+        chutes_timeout = settings.CHUTES_TIMEOUT_SEC
         
         async def prediction_callback(miner: Miner, payload: BBPredictedUtterance, context: str) -> str:
             """
@@ -174,27 +177,44 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
             Returns the prediction text or empty string on error.
             Exceptions are raised to be handled by the multi-miner function.
             """
-            if not miner.slug:
-                raise ValueError("Miner has no slug")
-            
-            result = await call_miner_model_on_chutes(
-                slug=miner.slug,
-                payload=payload,
-                context_used=context,
-                timeout=settings.CHUTES_TIMEOUT_SEC
-            )
-            
-            if result.success and result.utterance:
-                return result.utterance.prediction
-            else:
-                # Raise exception so the multi-miner function can handle error tracking
-                raise RuntimeError(f"{result.error}")
+            if miner.slug:
+                try:
+                    # Call via Chutes
+                    result = await call_miner_model_on_chutes(
+                        slug=miner.slug,
+                        payload=payload,
+                        context_used=context,
+                        timeout=chutes_timeout
+                    )
+                    
+                    if result.success and result.utterance:
+                        return result.utterance.prediction
+                    else:
+                        # Raise exception so the multi-miner function can handle error tracking
+                        raise RuntimeError(f"{result.error}")
+                except Exception as e:
+                    logger.warning(f"Miner {miner.uid} chute error: {e}, trying axon fallback")
+            if miner.axon_ip and miner.axon_port:
+                try:
+                    # Call via Axon endpoint
+                    result = await call_miner_axon_endpoint(
+                        axon_ip=miner.axon_ip,
+                        axon_port=miner.axon_port,
+                        payload=payload,
+                        context_used=context,
+                        timeout=chutes_timeout
+                    )
+                    
+                    if result.success and result.utterance:
+                        return result.utterance.prediction
+                    else:
+                        raise RuntimeError(f"{result.error}")
+                except Exception as e:
+                    logger.error(f"Miner {miner.uid} axon error: {e}")
+                    raise
+            # Neither chute nor axon available
+            raise RuntimeError(f"Miner {miner.uid} has neither chute slug nor axon endpoint available")
         
-        # NEW APPROACH: Single shared utterance session for all miners
-        # NOTE: All validators run at the same block (block % TEMPO == 0), so they call
-        # the utterance engine within seconds of each other. The utterance engine must
-        # ensure all validators get the same challenge_uid during this window.
-        # Additionally, step_block_modulo synchronizes validators at each utterance step.
         logger.info(f"Starting shared utterance session for {len(miner_list)} miners")
         
         # Get step block modulo from environment (default: 1 block)
@@ -204,7 +224,7 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
             utterance_engine_url=utterance_engine_url,
             miners=miner_list,
             prediction_callback=prediction_callback,
-            timeout=settings.CHUTES_TIMEOUT_SEC,
+            timeout=chutes_timeout,
             max_prediction_errors=5,
             subtensor=subtensor,
             step_block_modulo=step_block_modulo

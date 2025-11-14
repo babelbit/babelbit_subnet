@@ -126,7 +126,7 @@ EOF
 
 ## Postgres Database
 
-Validators will need to create their own Postgres database to persist miner scores. If you host DB's on windows or you prefer a manual sql schema to create the schema then please defer to the file manual_db_bb_schema.sql 
+Validators will need to create their own Postgres database to persist miner scores. 
 
 You can run the following command to create the schemas in your database:
 
@@ -185,6 +185,12 @@ sv -vv signer
 
 # Miners
 
+**Two options for running a miner:**
+1. **Chutes-hosted** (recommended for production): Deploy your model to Chutes cloud infrastructure
+2. **Self-hosted** (for development/testing): Run the miner API directly on your own hardware
+
+## Option 1: Chutes-Hosted Miner (Production)
+
 **IMPORTANT: Please follow the instructions below carefully to ensure the proper commitment of your chute.**
 
 <u>Note 1</u>: Using the CLI will help create the proper Chutes slug for your image and therefore avoid any issue during validation. Chutes slugs should contain the substring 'Babelbit'. Use the chute CLI directly at your own risk.
@@ -211,7 +217,10 @@ Register your miner to BabelBit (SNXX).
 btcli subnet register --wallet.name <your cold> --wallet.hotkey <your hot>
 ```
 
-2. Register a chute user via the CLI with the same hotkey you registered on Babelbit with, in order to deploy chutes for Babelbit with "babelbit" in the chute name.
+2. Upgrade Chutes to a Developer-Enable Account
+Miners need a chutes developer account ( `chutes.ai` ). 
+
+IMPORTANT: you require a ***developer enabled account*** on Chutes to mine. Normal API keys cannot deploy chutes right now.
 
 3. Train a model
 ```bash
@@ -275,6 +284,91 @@ You can remove an old version of your model from chutes if desired
 ```bash
 bb -v delete-chute --revision your-old-huggingface-repo-sha 
 ```
+
+## Option 2: Self-Hosted Miner (Development/Testing)
+
+For local development and testing, you can run a miner directly on your hardware without using Chutes.
+
+### Prerequisites
+- Python 3.10-3.13
+- Sufficient RAM/VRAM for your chosen model
+- For Mac: Models run on CPU by default (or MPS for Apple Silicon)
+
+### Setup
+
+1. **Configure your miner settings in `.env`:**
+
+```bash
+# Device configuration
+MINER_DEVICE=cpu              # Use 'cpu', 'cuda' (NVIDIA), or 'mps' (Apple Silicon)
+MINER_MODEL_ID=gpt2           # Start with gpt2 for testing, upgrade for production
+MINER_AXON_PORT=8091          # Port for the miner API
+MINER_LOAD_IN_8BIT=0          # Enable 8-bit quantization (requires bitsandbytes)
+MINER_LOAD_IN_4BIT=0          # Enable 4-bit quantization (requires bitsandbytes)
+```
+
+**Model recommendations:**
+- **Testing**: `gpt2` or `distilgpt2` (small, fast on CPU)
+- **Production**: `meta-llama/Llama-3.1-8B` or larger (requires GPU)
+
+2. **Register your miner's axon on-chain:**
+
+```bash
+uv run python babelbit/miner/register_axon.py
+```
+
+This registers your miner's IP and port with the Bittensor network so validators can find you.
+
+3. **Start the miner server:**
+
+```bash
+uv run babelbit/miner/serve_miner.py
+```
+
+The server will:
+- Load your model (first run may take time to download)
+- Start serving on the configured port (default: 8091)
+- Expose `/healthz` and `/predict` endpoints
+
+4. **Test your miner API:**
+
+```bash
+uv run babelbit/miner/tests/test_miner_api.py
+```
+
+This verifies both the health endpoint and prediction functionality.
+
+### Performance Tips
+
+**For Mac users:**
+- GPT-2 works well on CPU (inference ~2-5 seconds)
+- Larger models (Llama, etc.) are very slow on CPU (60-120 seconds)
+- MPS (Apple Silicon GPU) has compatibility issues with some models
+
+**For GPU users:**
+- Set `MINER_DEVICE=cuda`
+- Use larger models for better predictions
+- Enable quantization to reduce VRAM usage
+
+**Memory optimization:**
+- Enable 8-bit quantization: `MINER_LOAD_IN_8BIT=1`
+- Enable 4-bit quantization: `MINER_LOAD_IN_4BIT=1` (even more memory savings)
+
+### Troubleshooting
+
+**"Torch not compiled with CUDA enabled"**
+- You're on Mac or don't have a GPU - set `MINER_DEVICE=cpu`
+
+**"Placeholder storage has not been allocated on MPS device"**
+- MPS has issues with some models - use `MINER_DEVICE=cpu` instead
+
+**Predictions timeout**
+- Your model is too large for CPU - try `MINER_MODEL_ID=gpt2`
+- Or enable quantization to speed up inference
+
+**Model download fails**
+- For gated models (Llama, etc.), set `HF_TOKEN` environment variable
+- Check your HuggingFace access permissions
 
 
 

@@ -19,6 +19,8 @@ class Miner:
     slug: Optional[str]
     chute_id: Optional[str]
     block: int
+    axon_ip: Optional[str] = None
+    axon_port: Optional[int] = None
 
 
 # ------------------------- HF gating & revision checks ------------------------- #
@@ -121,8 +123,38 @@ async def get_miners_from_registry(netuid: int, subtensor=None) -> Dict[int, Min
     for uid, hk in enumerate(meta.hotkeys):
         arr = commits.get(hk)
         logger.info(f"UID {uid} hotkey {hk}: commitment = {arr}")
+        
+        # Extract axon information from metagraph (for all miners, regardless of commitment)
+        axon_ip = None
+        axon_port = None
+        try:
+            if hasattr(meta, 'axons') and uid < len(meta.axons):
+                axon = meta.axons[uid]
+                if hasattr(axon, 'ip') and hasattr(axon, 'port'):
+                    axon_ip = axon.ip
+                    axon_port = axon.port
+                    if axon_ip and axon_port:
+                        logger.info(f"UID {uid} has axon at {axon_ip}:{axon_port}")
+        except Exception as e:
+            logger.warning(f"UID {uid} failed to extract axon info: {e}")
+        
+        # If no commitment, check if miner has axon endpoint
         if not arr:
+            if axon_ip and axon_port:
+                logger.info(f"UID {uid} has no commitment but has axon endpoint, including as self-hosted miner")
+                candidates[uid] = Miner(
+                    uid=uid,
+                    hotkey=hk,
+                    model=None,
+                    revision=None,
+                    slug=None,
+                    chute_id=None,
+                    block=0,
+                    axon_ip=axon_ip,
+                    axon_port=axon_port,
+                )
             continue
+            
         block, data = arr[-1]
         try:
             obj = json.loads(data)
@@ -136,16 +168,49 @@ async def get_miners_from_registry(netuid: int, subtensor=None) -> Dict[int, Min
         slug = obj.get("slug")
         chute_id = obj.get("chute_id")
 
-        if not slug:
-            # no slug -> cannot call this miner
+        # If no slug and no axon, skip miner
+        if not slug and not (axon_ip and axon_port):
+            logger.warning(f"UID {uid} has neither slug nor axon endpoint, skipping")
             continue
         
         block = int(block or 0) if uid != 0 else 0  # mirror special-case for uid 0
 
-        # Slug deduplication: keep earliest block per slug
-        if slug not in seen_slugs:
-            seen_slugs[slug] = (uid, block)
-            # Add this miner since it's the first with this slug
+        # Slug deduplication: keep earliest block per slug (only if slug exists)
+        if slug:
+            if slug not in seen_slugs:
+                seen_slugs[slug] = (uid, block)
+                # Add this miner since it's the first with this slug
+                candidates[uid] = Miner(
+                    uid=uid,
+                    hotkey=hk,
+                    model=model,
+                    revision=revision,
+                    slug=slug,
+                    chute_id=chute_id,
+                    block=block,
+                    axon_ip=axon_ip,
+                    axon_port=axon_port,
+                )
+            elif seen_slugs[slug][1] > block:
+                # This miner has an earlier block, replace the previous one
+                candidates.pop(seen_slugs[slug][0], None)
+                logger.warning(
+                    f"Slug deduplication: eliminating UID {seen_slugs[slug][0]} with duplicate slug '{slug}'"
+                )
+                seen_slugs[slug] = (uid, block)
+                candidates[uid] = Miner(
+                    uid=uid,
+                    hotkey=hk,
+                    model=model,
+                    revision=revision,
+                    slug=slug,
+                    chute_id=chute_id,
+                    block=block,
+                    axon_ip=axon_ip,
+                    axon_port=axon_port,
+                )
+        else:
+            # No slug, but has axon - add directly
             candidates[uid] = Miner(
                 uid=uid,
                 hotkey=hk,
@@ -153,32 +218,25 @@ async def get_miners_from_registry(netuid: int, subtensor=None) -> Dict[int, Min
                 revision=revision,
                 slug=slug,
                 chute_id=chute_id,
-                block=block, 
+                block=block,
+                axon_ip=axon_ip,
+                axon_port=axon_port,
             )
-        elif seen_slugs[slug][1] > block:
-            # This miner has an earlier block, replace the previous one
-            candidates.pop(seen_slugs[slug][0], None)
-            logger.warning(
-                f"Slug deduplication: eliminating UID {seen_slugs[slug][0]} with duplicate slug '{slug}'"
-            )
-            seen_slugs[slug] = (uid, block)
-            candidates[uid] = Miner(
-                uid=uid,
-                hotkey=hk,
-                model=model,
-                revision=revision,
-                slug=slug,
-                chute_id=chute_id,
-                block=block, 
-            )
-        # else: current miner has later block, skip it
 
     if not candidates:
         return {}
 
     # 2) Filter by HF gating/inaccessible + Chutes slug/revision checks
+    # Note: allow self-hosted miners (no on-chain model/slug) if they expose an axon endpoint
     filtered: Dict[int, Miner] = {}
     for uid, m in candidates.items():
+        # Self-hosted miners won't have a model id; permit them if they expose an axon endpoint
+        if not m.model:
+            if m.axon_ip and m.axon_port:
+                filtered[uid] = m
+            # skip HF gating/chutes checks for self-hosted entries
+            continue
+
         gated = _hf_gated_or_inaccessible(m.model, m.revision)
         if gated is True:
             continue
@@ -207,6 +265,7 @@ async def get_miners_from_registry(netuid: int, subtensor=None) -> Dict[int, Min
     best_by_model: Dict[str, Tuple[int, int]] = {}
     for uid, m in filtered.items():
         if not m.model:
+            # skip self-hosted entries for model-based de-duplication
             continue
         blk = (
             m.block
@@ -219,4 +278,11 @@ async def get_miners_from_registry(netuid: int, subtensor=None) -> Dict[int, Min
 
     keep_uids = {uid for _, uid in best_by_model.values()}
 
-    return {uid: filtered[uid] for uid in keep_uids if uid in filtered}
+    # Assemble final result: include de-duplicated model-backed miners
+    result: Dict[int, Miner] = {uid: filtered[uid] for uid in keep_uids if uid in filtered}
+    # Also include any self-hosted miners (model is None) that passed earlier checks
+    for uid, m in filtered.items():
+        if not m.model:
+            result[uid] = m
+
+    return result

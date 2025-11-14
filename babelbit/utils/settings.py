@@ -1,6 +1,7 @@
 from os import getenv
 from functools import lru_cache
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, SecretStr
@@ -13,6 +14,7 @@ class Settings(BaseModel):
     BITTENSOR_WALLET_COLD: str
     BITTENSOR_WALLET_HOT: str
     BITTENSOR_WALLET_PATH: Path
+    BITTENSOR_NETWORK: str
     BITTENSOR_SUBTENSOR_ENDPOINT: str
     BITTENSOR_SUBTENSOR_FALLBACK: str
 
@@ -83,6 +85,19 @@ class Settings(BaseModel):
     S3_SIGNATURE_VERSION: str
     S3_USE_SSL: bool
 
+    # Miner configuration
+    MINER_MODEL_ID: str
+    MINER_MODEL_REVISION: Optional[str]
+    MINER_AXON_PORT: int
+    MINER_DEVICE: str
+    MINER_LOAD_IN_8BIT: bool
+    MINER_LOAD_IN_4BIT: bool
+    MINER_EXTERNAL_IP: Optional[str]
+    
+    # Development mode settings
+    BB_DEV_MODE: bool = False
+    BB_LOCAL_MINER_IP: Optional[str] = None
+
 
 @lru_cache
 def get_settings() -> Settings:
@@ -92,6 +107,7 @@ def get_settings() -> Settings:
         BITTENSOR_WALLET_COLD=getenv("BITTENSOR_WALLET_COLD", "default"),
         BITTENSOR_WALLET_HOT=getenv("BITTENSOR_WALLET_HOT", "default"),
         BITTENSOR_WALLET_PATH=Path(getenv("BITTENSOR_WALLET_PATH", "~/.bittensor/wallets")).expanduser(),
+        BITTENSOR_NETWORK=getenv("BITTENSOR_NETWORK", "finney"),
         BITTENSOR_SUBTENSOR_ENDPOINT=getenv("BITTENSOR_SUBTENSOR_ENDPOINT", "finney"),
         BITTENSOR_SUBTENSOR_FALLBACK=getenv(
             "BITTENSOR_SUBTENSOR_FALLBACK", "wss://lite.sub.latent.to:443"
@@ -122,7 +138,10 @@ def get_settings() -> Settings:
         BB_MINER_PREDICT_ENDPOINT=getenv("BB_MINER_PREDICT_ENDPOINT", "predict"),
         BB_ENABLE_DB_WRITES=getenv("BB_ENABLE_DB_WRITES", "0").lower() in ("1", "true", "yes"),
         BB_UTTERANCE_ENGINE_URL=getenv("BB_UTTERANCE_ENGINE_URL", "http://localhost:8999"),
-        BB_RUNNER_ON_STARTUP=int(getenv("BB_RUNNER_ON_STARTUP", "false").lower() in ("1", "true", "yes")),
+        BB_RUNNER_ON_STARTUP=getenv("BB_RUNNER_ON_STARTUP", "false").lower() in ("1", "true", "yes"),
+        # Development / local testing flags
+        BB_DEV_MODE=getenv("BB_DEV_MODE", "0").lower() in ("1", "true", "yes"),
+        BB_LOCAL_MINER_IP=getenv("BB_LOCAL_MINER_IP", ""),
         
         
 
@@ -151,11 +170,11 @@ def get_settings() -> Settings:
         SIGNER_PORT=int(getenv("SIGNER_PORT", "8080")),
         
         # Database settings
-        PG_HOST=getenv("PG_HOST", "localhost"),
+        PG_HOST=getenv("PG_HOST", "db"),
         PG_PORT=int(getenv("PG_PORT", "5432")),
-        PG_DB=getenv("PG_DB", "postgres"),
-        PG_USER=getenv("PG_USER", "postgres"),
-        PG_PASSWORD=SecretStr(getenv("PG_PASSWORD", "")),
+        PG_DB=getenv("PG_DB", "babelbit"),
+        PG_USER=getenv("PG_USER", "babelbit"),
+        PG_PASSWORD=SecretStr(getenv("PG_PASSWORD", "babelbit")),
         
         # S3 / Object Storage settings
         S3_ENDPOINT_URL=getenv("S3_ENDPOINT_URL", ""),
@@ -168,4 +187,14 @@ def get_settings() -> Settings:
         S3_ADDRESSING_STYLE=getenv("S3_ADDRESSING_STYLE", "path"),
         S3_SIGNATURE_VERSION=getenv("S3_SIGNATURE_VERSION", "s3v4"),
         S3_USE_SSL=getenv("S3_USE_SSL", "true").lower() in ("true", "1", "yes"),
+
+        # Miner configuration
+        MINER_MODEL_ID=getenv("MINER_MODEL_ID", "gpt2"),
+        MINER_MODEL_REVISION=getenv("MINER_MODEL_REVISION"),
+        MINER_AXON_PORT=int(getenv("MINER_AXON_PORT", "8091")),
+        MINER_DEVICE=getenv("MINER_DEVICE", "cpu"),
+        MINER_LOAD_IN_8BIT=getenv("MINER_LOAD_IN_8BIT", "0").lower() in {"1", "true", "yes"},
+        MINER_LOAD_IN_4BIT=getenv("MINER_LOAD_IN_4BIT", "0").lower() in {"1", "true", "yes"},
+        MINER_EXTERNAL_IP=getenv("MINER_EXTERNAL_IP"),
+
     )

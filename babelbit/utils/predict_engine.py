@@ -73,12 +73,125 @@ async def create_chute_prediction_callback(slug: str, timeout: Optional[float] =
     return chute_predictor
 
 
-async def call_miner_model_on_chutes(slug: str, payload: BBPredictedUtterance, context_used: str, timeout: Optional[float] = None) -> BBPredictOutput:
+async def call_miner_model_on_chutes(slug: str, 
+                                     payload: BBPredictedUtterance, 
+                                     context_used: str, 
+                                     timeout: Optional[float] = None) -> BBPredictOutput:
     """Call a miner's chute for utterance prediction."""
     if timeout is None:
         settings = get_settings()
         timeout = float(settings.CHUTES_TIMEOUT_SEC)
     return await predict_utterance(payload=payload, slug=slug, context_used=context_used, timeout=timeout)
+
+async def call_miner_axon_endpoint(
+    axon_ip: str,
+    axon_port: int,
+    payload: BBPredictedUtterance,
+    context_used: str,
+    timeout: Optional[float] = None
+) -> BBPredictOutput:
+    """
+    Call a miner's axon endpoint directly for utterance prediction.
+    
+    Args:
+        axon_ip: IP address of the miner's axon
+        axon_port: Port of the miner's axon
+        payload: The utterance prediction request
+        context_used: Context string used for this prediction
+        timeout: Request timeout in seconds
+        
+    Returns:
+        BBPredictOutput with prediction result or error
+    """
+    # Load settings once
+    settings = get_settings()
+
+    if timeout is None:
+        timeout = float(settings.CHUTES_TIMEOUT_SEC)
+
+    # If running in development/local mode, translate localhost or host IPs so
+    # containers can reach services running on the Docker host via host.docker.internal
+    try:
+        if getattr(settings, "BB_DEV_MODE", False):
+            local_ip = getattr(settings, "BB_LOCAL_MINER_IP", "") or None
+            # common local addresses to translate
+            if axon_ip in ("127.0.0.1", "localhost", "0.0.0.0") or (local_ip and axon_ip == local_ip):
+                logger.info(f"Dev mode: translating axon IP {axon_ip} -> host.docker.internal")
+                axon_ip = "host.docker.internal"
+    except Exception:
+        # Non-fatal; continue with original axon_ip
+        pass
+
+    url = f"http://{axon_ip}:{axon_port}/{settings.BB_MINER_PREDICT_ENDPOINT}"
+    session = await get_async_client()
+    
+    t0 = monotonic()
+    
+    try:
+        async with session.post(
+            url,
+            json=payload.model_dump(mode="json"),
+            timeout=ClientTimeout(total=timeout)
+        ) as response:
+            latency = monotonic() - t0
+            text = await response.text()
+            
+            if response.status != 200:
+                return BBPredictOutput(
+                    success=False,
+                    model="axon",
+                    utterance=payload,
+                    error=f"{response.status}:{text[:300]}",
+                    context_used=context_used,
+                    complete=False
+                )
+            
+            try:
+                data = loads(text)
+                prediction = data.get("prediction", "")
+                
+                return BBPredictOutput(
+                    success=True,
+                    model="axon",
+                    utterance=BBPredictedUtterance(
+                        index=payload.index,
+                        step=payload.step,
+                        prefix=payload.prefix,
+                        prediction=prediction,
+                        context=context_used,
+                    ),
+                    error=None,
+                    context_used=context_used,
+                    complete=True
+                )
+            except Exception as e:
+                return BBPredictOutput(
+                    success=False,
+                    model="axon",
+                    utterance=payload,
+                    error=f"parse:{str(e)}",
+                    context_used=context_used,
+                    complete=False
+                )
+                
+    except TimeoutError:
+        return BBPredictOutput(
+            success=False,
+            model="axon",
+            utterance=payload,
+            error=f"timeout after {timeout}s",
+            context_used=context_used,
+            complete=False
+        )
+    except Exception as e:
+        return BBPredictOutput(
+            success=False,
+            model="axon",
+            utterance=payload,
+            error=f"{type(e).__name__}:{str(e)}",
+            context_used=context_used,
+            complete=False
+        )
 
 
 async def predict_utterance(

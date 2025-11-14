@@ -542,6 +542,12 @@ async def predict_with_utterance_engine_multi_miner(
                 
                 logger.info(f"[Utterance {current_utterance_index} Step {step_num}] Token: '{current_token}' - Querying {sum(1 for a in miner_active.values() if a)}/{len(miners)} active miners")
                 
+                # Check if all miners are deactivated - if so, stop processing this session
+                active_count = sum(1 for a in miner_active.values() if a)
+                if active_count == 0:
+                    logger.warning(f"[Utterance {current_utterance_index} Step {step_num}] All miners deactivated, stopping session early")
+                    break
+                
                 # Query ALL active miners in parallel for this step
                 prefix_text = " ".join(current_utterance_tokens)
                 
