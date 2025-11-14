@@ -189,7 +189,7 @@ def get_settings() -> Settings:
         S3_USE_SSL=getenv("S3_USE_SSL", "true").lower() in ("true", "1", "yes"),
 
         # Miner configuration
-        MINER_MODEL_ID=getenv("MINER_MODEL_ID", "gpt2"),
+        MINER_MODEL_ID=getenv("MINER_MODEL_ID", "babelbit-ai/base-miner"),
         MINER_MODEL_REVISION=getenv("MINER_MODEL_REVISION"),
         MINER_AXON_PORT=int(getenv("MINER_AXON_PORT", "8091")),
         MINER_DEVICE=getenv("MINER_DEVICE", "cpu"),

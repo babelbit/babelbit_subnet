@@ -37,12 +37,13 @@ async def test_predict(base_url: str, timeout: float = 30.0) -> bool:
     """Test the /predict endpoint."""
     print("\n🔍 Testing prediction endpoint...")
     
-    # Sample request
+    # Sample request matching the validator's expected format
     test_request = {
-        "index": 0,
+        "index": "test-session-123",  # UUID string
         "step": 1,
         "prefix": "Hello, my name is",
-        "context": "This is a test conversation to verify the miner API is working."
+        "context": "This is a test conversation to verify the miner API is working.",
+        "done": False
     }
     
     print(f"   Sending request:")
@@ -58,7 +59,14 @@ async def test_predict(base_url: str, timeout: float = 30.0) -> bool:
             
             if response.status_code == 200:
                 data = response.json()
+                
+                # Check simple response format: {"prediction": "..."}
                 prediction = data.get("prediction", "")
+                
+                if not prediction:
+                    print(f"❌ Prediction returned empty")
+                    return False
+                
                 print(f"✅ Prediction successful!")
                 print(f"   Generated text: '{prediction[:100]}{'...' if len(prediction) > 100 else ''}'")
                 print(f"   Full prediction length: {len(prediction)} characters")
