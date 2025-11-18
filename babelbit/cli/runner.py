@@ -78,19 +78,6 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
     MAX_MINERS = int(os.getenv("BB_MAX_MINERS_PER_RUN", "256"))
     utterance_engine_url = utterance_engine_url or os.getenv("BB_UTTERANCE_ENGINE_URL", "http://localhost:8000")
     
-    # Initialize utterance engine authentication
-    wallet_name = os.getenv("BITTENSOR_WALLET_COLD", "default")
-    hotkey_name = os.getenv("BITTENSOR_WALLET_HOT", "default")
-    
-    init_utterance_auth(utterance_engine_url, wallet_name, hotkey_name)
-    
-    # Authenticate with utterance engine
-    try:
-        await authenticate_utterance_engine()
-        logger.info("Successfully authenticated with utterance engine")
-    except Exception as e:
-        logger.error(f"Failed to authenticate with utterance engine: {e}")
-        return
     # Determine directories:
     #   Raw logs:   ./logs (override with BB_OUTPUT_LOGS_DIR)
     #   Scores:     ./scores (override with BB_OUTPUT_SCORES_DIR or output_dir argument) produced after scoring
@@ -427,17 +414,32 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
 
 
 async def runner_loop():
-    """Runs `runner()` every N blocks (default: 300)."""
+    """Runs `runner()` every N blocks (default: 1080)."""
     settings = get_settings()
-    # TEMPO = int(os.getenv("BABELBIT_TEMPO", "300"))
-    # ensures validators are in sync with block production
-    TEMPO = 300
+    TEMPO = int(os.getenv("BABELBIT_RUNNER_TEMPO", "1080"))
     MAX_SUBTENSOR_RETRIES = int(os.getenv("BABELBIT_MAX_SUBTENSOR_RETRIES", "5"))
 
     st = None
     last_block = -1
     last_successful_run = 0
     consecutive_failures = 0
+    
+    # Initialize utterance engine authentication on startup
+    utterance_engine_url = os.getenv("BB_UTTERANCE_ENGINE_URL", "https://api.babelbit.ai")
+    wallet_name = os.getenv("BITTENSOR_WALLET_COLD", "default")
+    hotkey_name = os.getenv("BITTENSOR_WALLET_HOT", "default")
+    
+    init_utterance_auth(utterance_engine_url, wallet_name, hotkey_name)
+    
+    # Authenticate with retry logic on startup
+    try:
+        logger.info("[RunnerLoop] Authenticating with utterance engine on startup...")
+        await authenticate_utterance_engine()
+        logger.info("[RunnerLoop] Successfully authenticated with utterance engine")
+    except Exception as e:
+        logger.error(f"[RunnerLoop] Failed to authenticate with utterance engine on startup: {e}")
+        logger.error("[RunnerLoop] Cannot proceed without authentication. Exiting.")
+        return
 
     try:
         while True:
@@ -471,13 +473,34 @@ async def runner_loop():
                 try:
                     block = await asyncio.wait_for(st.get_current_block(), timeout=30)
                     logger.debug(f"[RunnerLoop] Current block: {block}")
+
+                    # Refresh authentication 100 blocks before each run (or less if TEMPO < 100)
+                    auth_refresh_offset = TEMPO - min(100, max(1, TEMPO - 1))
+                    if block % TEMPO == auth_refresh_offset:
+                        try:
+                            logger.info(f"[RunnerLoop] Refreshing authentication at block {block} ({TEMPO - auth_refresh_offset} blocks before next run)")
+                            await authenticate_utterance_engine()
+                            logger.info("[RunnerLoop] Authentication refresh successful")
+                        except Exception as auth_e:
+                            logger.error(f"[RunnerLoop] Authentication refresh failed: {auth_e}")
+                            # Don't stop the loop, but this will cause issues for the next runner() call
                     
                     # run immediately on startup if configured
                     if (settings.BB_RUNNER_ON_STARTUP and last_successful_run == 0) or (block > last_block and block % TEMPO == 0):
                         should_run = True
                         logger.info(f"[RunnerLoop] Triggering runner at block {block}")
                     else:
-                        await st.wait_for_block()
+                        # Wait for next block with timeout
+                        try:
+                            await asyncio.wait_for(st.wait_for_block(), timeout=60)
+                        except asyncio.TimeoutError:
+                            # Don't reset on timeout - just log and retry
+                            logger.debug("[RunnerLoop] wait_for_block timeout (60s) — retrying")
+                            await asyncio.sleep(5)
+                        except Exception as e:
+                            logger.warning(f"[RunnerLoop] wait_for_block error: {e}")
+                            st = None
+                            await reset_subtensor()
                         continue
                         
                 except Exception as e:

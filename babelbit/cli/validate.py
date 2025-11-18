@@ -10,6 +10,7 @@ import bittensor as bt
 
 from babelbit.utils.bittensor_helpers import (
     get_subtensor,
+    reset_subtensor,
     _set_weights_with_confirmation,
 )
 from babelbit.utils.prometheus import (
@@ -70,13 +71,18 @@ async def _validate_main(tail: int, alpha: float, m_min: int, tempo: int):
         try:
             if st is None:
                 try:
+                    await reset_subtensor()  # Clear any stale cached connection
                     st = await asyncio.wait_for(get_subtensor(), timeout=20)
                 except asyncio.TimeoutError:
                     logger.warning("Subtensor init timeout (20s) — retrying…")
+                    st = None
+                    await reset_subtensor()
                     await asyncio.sleep(5)
                     continue
                 except Exception as e:
                     logger.warning("Subtensor init error: %s — retrying…", e)
+                    st = None
+                    await reset_subtensor()
                     await asyncio.sleep(5)
                     continue
 
@@ -85,21 +91,33 @@ async def _validate_main(tail: int, alpha: float, m_min: int, tempo: int):
             except asyncio.TimeoutError:
                 logger.warning("get_current_block timed out (15s) — resetting subtensor")
                 st = None
+                await reset_subtensor()
                 continue
             except Exception as e:
                 logger.warning("Error reading current block: %s — resetting subtensor", e)
                 st = None
+                await reset_subtensor()
                 await asyncio.sleep(3)
                 continue
 
             logger.debug("Current block=%d", block)
 
             if block % tempo != 0 or block <= last_done:
+                # Wait for next block or timeout
+                # Note: Blocks are ~12s on finney, but can be delayed
+                # Use a generous timeout and just retry on failure rather than resetting connection
                 try:
-                    await asyncio.wait_for(st.wait_for_block(), timeout=30)
+                    await asyncio.wait_for(st.wait_for_block(), timeout=60)
                 except asyncio.TimeoutError:
-                    logger.warning("wait_for_block timeout (30s) — refreshing subtensor")
+                    # Don't reset connection on timeout - just log and retry
+                    # This is normal when blocks are slow or network is spotty
+                    logger.debug("wait_for_block timeout (60s) — will retry on next iteration")
+                    await asyncio.sleep(5)  # Brief sleep before retry
+                except Exception as e:
+                    logger.warning("wait_for_block error: %s — refreshing subtensor", e)
                     st = None
+                    await reset_subtensor()
+                    await asyncio.sleep(3)
                 continue
 
             uids, weights, current_challenge_uid = await get_weights(
@@ -160,6 +178,7 @@ async def _validate_main(tail: int, alpha: float, m_min: int, tempo: int):
             traceback.print_exc()
             logger.warning("Validator loop error: %s — reconnecting…", e)
             st = None
+            await reset_subtensor()
             await asyncio.sleep(5)
 
 

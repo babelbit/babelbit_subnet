@@ -5,6 +5,7 @@ Handles JWT authentication for the utterance engine API using Bittensor validato
 """
 
 import time
+import asyncio
 from typing import Optional, Dict, Any
 from logging import getLogger
 
@@ -154,8 +155,33 @@ async def get_auth_headers() -> Dict[str, str]:
 
 
 async def authenticate_utterance_engine() -> Dict[str, Any]:
-    """Authenticate with utterance engine using global authenticator"""
+    """
+    Authenticate with utterance engine using global authenticator.
+    Includes retry logic with exponential backoff for robustness.
+    """
     if not _authenticator:
         raise UtteranceAuthError("Utterance authenticator not initialized. Call init_utterance_auth() first.")
     
-    return await _authenticator.authenticate()
+    max_retries = 5
+    base_delay = 2  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            result = await _authenticator.authenticate()
+            if attempt > 0:
+                logger.info(f"Authentication succeeded on attempt {attempt + 1}")
+            return result
+        except Exception as e:
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)  # exponential backoff: 2, 4, 8, 16 seconds
+                logger.warning(
+                    f"Authentication attempt {attempt + 1}/{max_retries} failed: {e}. "
+                    f"Retrying in {delay}s..."
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.error(f"Authentication failed after {max_retries} attempts")
+                raise UtteranceAuthError(f"Failed to authenticate after {max_retries} attempts: {e}")
+    
+    # This should never be reached, but for type safety
+    raise UtteranceAuthError("Authentication failed unexpectedly")
