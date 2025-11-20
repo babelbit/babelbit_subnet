@@ -1,5 +1,7 @@
 x-common: &common
-  build: .
+  build:
+    context: .
+    target: production-with-tests  # Build production image only after tests pass
   restart: unless-stopped
   env_file: .env
   mem_reservation: "6g"

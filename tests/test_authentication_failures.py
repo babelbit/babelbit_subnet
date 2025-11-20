@@ -28,14 +28,18 @@ class TestAuthenticationFailures:
 
     @pytest.mark.asyncio
     async def test_runner_exits_on_authentication_failure(self, tmp_path):
-        """Test that runner exits gracefully when authentication fails"""
+        """Test that runner_loop exits gracefully when authentication fails"""
         
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
         mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_RUNNER_ON_STARTUP = False
         
         logs_dir = tmp_path / "logs"
         scores_dir = tmp_path / "scores"
+        
+        # Import runner_loop instead of runner
+        from babelbit.cli.runner import runner_loop
         
         with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
              patch('babelbit.cli.runner.init_utterance_auth') as mock_init_auth, \
@@ -47,22 +51,22 @@ class TestAuthenticationFailures:
             # Simulate authentication failure
             mock_auth.side_effect = UtteranceAuthError("Invalid credentials")
             
-            # Run the function
+            # Run runner_loop which handles authentication
             with patch.dict('os.environ', {
                 'BB_OUTPUT_LOGS_DIR': str(logs_dir),
                 'BB_OUTPUT_SCORES_DIR': str(scores_dir)
             }):
-                await runner(utterance_engine_url="http://localhost:8000")
+                await runner_loop()
             
         # Verify authentication was attempted
         mock_init_auth.assert_called_once()
         mock_auth.assert_called_once()
         
-        # Verify runner exited early - challenge and miners should not be fetched
+        # Verify runner_loop exited early - challenge and miners should not be fetched
         mock_challenge.assert_not_called()
         mock_miners.assert_not_called()
         
-        # Note: close_http_clients is NOT called when runner returns early (before try-finally block)    def test_auth_token_expiration_and_refresh(self):
+        # Note: close_http_clients is NOT called when runner_loop returns early (before try-finally block)    def test_auth_token_expiration_and_refresh(self):
         """Test that expired auth tokens are refreshed automatically"""
         
         authenticator = UtteranceAuthenticator(

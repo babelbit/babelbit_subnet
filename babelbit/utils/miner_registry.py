@@ -228,12 +228,16 @@ async def get_miners_from_registry(netuid: int, subtensor=None) -> Dict[int, Min
 
     # 2) Filter by HF gating/inaccessible + Chutes slug/revision checks
     # Note: allow self-hosted miners (no on-chain model/slug) if they expose an axon endpoint
+    logger.info(f"Starting filtering of {len(candidates)} candidates: {list(candidates.keys())}")
     filtered: Dict[int, Miner] = {}
     for uid, m in candidates.items():
         # Self-hosted miners won't have a model id; permit them if they expose an axon endpoint
         if not m.model:
             if m.axon_ip and m.axon_port:
+                logger.info(f"UID {uid} is self-hosted with axon {m.axon_ip}:{m.axon_port}, adding to filtered")
                 filtered[uid] = m
+            else:
+                logger.info(f"UID {uid} is self-hosted but missing axon, skipping")
             # skip HF gating/chutes checks for self-hosted entries
             continue
 
@@ -262,10 +266,12 @@ async def get_miners_from_registry(netuid: int, subtensor=None) -> Dict[int, Min
         return {}
 
     # 3) De-duplicate by model: keep earliest block per model (stable)
+    logger.info(f"Starting model deduplication of {len(filtered)} filtered miners: {list(filtered.keys())}")
     best_by_model: Dict[str, Tuple[int, int]] = {}
     for uid, m in filtered.items():
         if not m.model:
             # skip self-hosted entries for model-based de-duplication
+            logger.info(f"UID {uid} is self-hosted (no model), skipping deduplication")
             continue
         blk = (
             m.block
@@ -277,12 +283,18 @@ async def get_miners_from_registry(netuid: int, subtensor=None) -> Dict[int, Min
             best_by_model[m.model] = (blk, uid)
 
     keep_uids = {uid for _, uid in best_by_model.values()}
+    
+    logger.info(f"Model-backed miners to keep: {keep_uids}")
 
     # Assemble final result: include de-duplicated model-backed miners
     result: Dict[int, Miner] = {uid: filtered[uid] for uid in keep_uids if uid in filtered}
+    logger.info(f"After adding model-backed miners, result has {len(result)} miners: {list(result.keys())}")
+    
     # Also include any self-hosted miners (model is None) that passed earlier checks
     for uid, m in filtered.items():
         if not m.model:
+            logger.info(f"Adding self-hosted UID {uid} to final result")
             result[uid] = m
-
+    
+    logger.info(f"Final result has {len(result)} miners: {list(result.keys())}")
     return result

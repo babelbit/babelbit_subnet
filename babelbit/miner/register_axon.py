@@ -3,6 +3,7 @@ Register miner's axon on the Bittensor network.
 This script only handles on-chain registration so validators can discover the miner.
 The actual serving of predictions is handled by serve_miner.py
 """
+import argparse
 import logging
 import bittensor as bt
 
@@ -11,7 +12,7 @@ from babelbit.utils.settings import get_settings
 logger = logging.getLogger(__name__)
 
 
-def register_axon():
+def register_axon(external_ip_override=None):
     """Register the miner's axon on-chain."""
     logging.basicConfig(
         level=logging.INFO,
@@ -27,7 +28,7 @@ def register_axon():
     
     # Get axon configuration
     axon_port = settings.MINER_AXON_PORT
-    external_ip = settings.MINER_EXTERNAL_IP
+    external_ip = external_ip_override or settings.MINER_EXTERNAL_IP
     
     logger.info(f"Wallet: {wallet_name}/{hotkey_name}")
     logger.info(f"Hotkey: {wallet.hotkey.ss58_address}")
@@ -41,7 +42,7 @@ def register_axon():
     )
     
     # Get network configuration
-    network = settings.BITTENSOR_NETWORK
+    network = settings.BITTENSOR_SUBTENSOR_ENDPOINT
     netuid = settings.BABELBIT_NETUID
     
     # Register the axon on-chain
@@ -89,5 +90,39 @@ def register_axon():
         raise
 
 
+
 if __name__ == "__main__":
-    register_axon()
+    # Parse custom arguments before bt.wallet() interferes
+    parser = argparse.ArgumentParser(
+        description="Register miner's axon on the Bittensor network",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Register with IP from settings/env
+  python babelbit/miner/register_axon.py
+  
+  # Register with specific external IP
+  python babelbit/miner/register_axon.py --external-ip x.x.x.x
+  
+  # Register with auto-detected IP
+  python babelbit/miner/register_axon.py --external-ip auto
+        """,
+        add_help=True,
+        allow_abbrev=False
+    )
+    parser.add_argument(
+        "--external-ip",
+        type=str,
+        help="External IP address for the axon (overrides MINER_EXTERNAL_IP setting)",
+        default=None
+    )
+    
+    # Parse known args to avoid conflicts with bittensor's parser
+    args, unknown = parser.parse_known_args()
+    
+    # If user asked for help with our custom args, show it
+    if '-h' in unknown or '--help' in unknown:
+        parser.print_help()
+        exit(0)
+    
+    register_axon(external_ip_override=args.external_ip)

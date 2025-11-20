@@ -8,16 +8,19 @@ then run this script to serve predictions.
 import asyncio
 import logging
 import os
+import time
 from pathlib import Path
 from traceback import format_exc
 from typing import Optional
 
 import torch
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Header, status
 from pydantic import BaseModel
 import uvicorn
+from substrateinterface import Keypair
 
 from babelbit.miner.model_loader import load_model_and_tokenizer
+from babelbit.miner.utils import verify_bittensor_request
 from babelbit.utils.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -436,11 +439,92 @@ async def health_alt():
 
 
 @app.post("/predict", response_model=PredictResponse)
-async def predict_endpoint(request: PredictRequest):
-    """Prediction endpoint matching chute template."""
+async def predict_endpoint(
+    request: PredictRequest,
+    http_request: Request,
+):
+    """
+    Prediction endpoint with Bittensor protocol verification.
+    
+    Validates incoming requests from validators using cryptographic signatures
+    and nonce-based replay attack prevention.
+    
+    Set MINER_DEV_MODE=1 to bypass verification for local testing.
+    """
     if miner_instance is None:
         raise HTTPException(status_code=503, detail="Miner not initialized")
     
+    # Check if dev mode is enabled (bypass verification)
+    settings = get_settings()
+    dev_mode = getattr(settings, "MINER_DEV_MODE", False) or os.getenv("MINER_DEV_MODE", "0") in ("1", "true", "True")
+    
+    if dev_mode:
+        logger.info("🔓 Dev mode enabled - bypassing Bittensor verification")
+        return await miner_instance.predict(request)
+    
+    # Extract Bittensor headers
+    headers = http_request.headers
+    
+    # Get required Bittensor protocol headers
+    dendrite_hotkey = headers.get("bt_header_dendrite_hotkey")
+    dendrite_nonce = headers.get("bt_header_dendrite_nonce")
+    dendrite_signature = headers.get("bt_header_dendrite_signature")
+    dendrite_uuid = headers.get("bt_header_dendrite_uuid")
+    axon_hotkey = headers.get("bt_header_axon_hotkey")
+    body_hash = headers.get("computed_body_hash", "")
+    timeout_str = headers.get("timeout", "12.0")
+    
+    # Check if this is a Bittensor protocol request
+    is_bittensor_request = all([
+        dendrite_hotkey,
+        dendrite_nonce,
+        dendrite_signature,
+        dendrite_uuid,
+        axon_hotkey,
+    ])
+    
+    if is_bittensor_request:
+        # Verify the request using Bittensor protocol
+        try:
+            timeout = float(timeout_str)
+        except ValueError:
+            timeout = 12.0
+        
+        is_valid, error_msg = verify_bittensor_request(
+            dendrite_hotkey=dendrite_hotkey,
+            dendrite_nonce=dendrite_nonce,
+            dendrite_signature=dendrite_signature,
+            dendrite_uuid=dendrite_uuid,
+            axon_hotkey=axon_hotkey,
+            body_hash=body_hash,
+            timeout=timeout,
+        )
+        
+        if not is_valid:
+            logger.warning(f"Request verification failed from {dendrite_hotkey[:8]}...: {error_msg}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Request verification failed: {error_msg}"
+            )
+        
+        logger.info(f"✅ Verified request from validator: {dendrite_hotkey[:8]}...")
+    else:
+        # Non-Bittensor request - check dev mode
+        settings = get_settings()
+        dev_mode = getattr(settings, "MINER_DEV_MODE", False) or os.getenv("MINER_DEV_MODE", "0") in ("1", "true", "True")
+        
+        if not dev_mode:
+            # In production mode, reject requests without Bittensor headers
+            logger.warning("Rejecting request without Bittensor headers (production mode)")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Bittensor protocol headers required"
+            )
+        
+        # Allow non-Bittensor requests only in dev mode
+        logger.info("Processing request without Bittensor verification (dev mode)")
+    
+    # Process the prediction request
     return await miner_instance.predict(request)
 
 
@@ -459,6 +543,18 @@ async def main():
     logger.info("Starting Babelbit Miner Server")
     logger.info("=" * 60)
     logger.info("")
+    
+    # Check dev mode
+    dev_mode = getattr(settings, "MINER_DEV_MODE", False) or os.getenv("MINER_DEV_MODE", "0") in ("1", "true", "True")
+    if dev_mode:
+        logger.warning("🔓 DEV MODE ENABLED - Bittensor verification DISABLED")
+        logger.warning("   This should ONLY be used for local testing!")
+        logger.warning("   Set MINER_DEV_MODE=0 for production use.")
+        logger.info("")
+    else:
+        logger.info("🔒 Bittensor verification enabled (production mode)")
+        logger.info("")
+    
     logger.info("⚠️  Make sure you've registered your axon first:")
     logger.info("   uv run python babelbit/miner/register_axon.py")
     logger.info("")

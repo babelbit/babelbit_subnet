@@ -223,6 +223,7 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25, co
         try:
             current_challenge_uid = await get_current_challenge_uid(utterance_engine_url)
             logger.info(f"Current active challenge: {current_challenge_uid}")
+            logger.debug("get_weights: current_challenge_uid=%s from %s", current_challenge_uid, utterance_engine_url)
         except Exception as e:
             logger.warning(f"Failed to get current challenge ID from {utterance_engine_url}: {e}")
 
@@ -231,11 +232,13 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25, co
     if current_challenge_uid:
         # First check file-based status (fast)
         challenge_processed = is_challenge_processed(current_challenge_uid)
+        logger.debug("get_weights: file-based challenge_processed=%s for %s", challenge_processed, current_challenge_uid)
         
         # If not found in files, check DB as fallback
         if not challenge_processed:
             logger.debug(f"Challenge {current_challenge_uid} not found in status files, checking DB...")
             challenge_processed = await is_challenge_processed_db(current_challenge_uid)
+        logger.debug("get_weights: final challenge_processed=%s for %s", challenge_processed, current_challenge_uid)
     
     # If challenge hasn't been processed yet, use last challenge winner
     if current_challenge_uid and not challenge_processed:
@@ -268,6 +271,7 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25, co
             # Use efficient challenge-specific query
             from babelbit.utils.db_pool import _iter_scores_for_challenge
             challenge_scores = await _iter_scores_for_challenge(current_challenge_uid)
+            logger.debug("get_weights: fetched %d score rows for current challenge %s", len(challenge_scores or []), current_challenge_uid)
             if not challenge_scores:
                 # Check if we should fall back to default weight
                 if consecutive_skipped_epochs >= MAX_SKIPPED_EPOCHS:
@@ -283,16 +287,19 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25, co
                     )
                     # Use the last challenge instead
                     use_current_challenge = False
+                    logger.debug("get_weights: switching to fallback DB path (no scores for current challenge)")
             else:
                 logger.info(f"Found {len(challenge_scores)} miners with scores for current challenge {current_challenge_uid}")
                 # Convert to the expected format for later processing
                 current_rows = [(hk, score, current_challenge_uid) for hk, score in challenge_scores]
                 data_source = "current_challenge"
+                logger.debug("get_weights: data_source=%s current_rows=%d", data_source, len(current_rows))
         
         if not use_current_challenge:
             # Fallback: fetch recent rows and use most recent challenge
             logger.info("Using most recent challenge in DB for weight assignment")
             db_rows = await _iter_scores_from_db(limit=tail)
+            logger.debug("get_weights: fetched %d DB rows for fallback path", len(db_rows or []))
             if not db_rows:
                 # No historical data available at all
                 if consecutive_skipped_epochs >= MAX_SKIPPED_EPOCHS:
@@ -308,24 +315,49 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25, co
                     )
                     return [], [], None
             
-            # Parse and find latest challenge
+            # Parse and find latest challenge with timestamp check
             enriched = []
             for tup in db_rows:
-                if len(tup) == 3:
+                if len(tup) == 4:
+                    hk, score, challenge_uid, timestamp = tup
+                elif len(tup) == 3:
                     hk, score, challenge_uid = tup
+                    timestamp = None
                 else:
                     hk, score = tup[0], tup[1]
                     challenge_uid = ""  # unknown
-                enriched.append((hk, score, challenge_uid))
+                    timestamp = None
+                enriched.append((hk, score, challenge_uid, timestamp))
             
-            # Use most recent challenge in DB
+            # Use most recent challenge in DB, but check if it's too old
             latest_challenge = None
-            for hk, score, cu in enriched:
+            latest_timestamp = None
+            for hk, score, cu, ts in enriched:
                 latest_challenge = cu
+                latest_timestamp = ts
                 break
-            current_rows = [r for r in enriched if r[2] == latest_challenge]
+            logger.debug("get_weights: latest_challenge=%s latest_timestamp=%s", latest_challenge, latest_timestamp)
+            
+            # Check if the fallback challenge is older than 12 hours
+            if latest_timestamp:
+                age_hours = (datetime.now(timezone.utc) - latest_timestamp).total_seconds() / 3600
+                if age_hours > 12:
+                    logger.warning(
+                        f"Latest challenge {latest_challenge} is {age_hours:.1f} hours old (>12h). "
+                        f"Data too stale for weight assignment."
+                    )
+                    logger.debug("get_weights: fallback challenge age=%.2f hours exceeds threshold", age_hours)
+                    if consecutive_skipped_epochs >= MAX_SKIPPED_EPOCHS:
+                        logger.warning("Falling back to default weight (uid 248) after max skipped epochs.")
+                        return [248], [1.0], None
+                    else:
+                        logger.info(f"Skipping weights this round ({consecutive_skipped_epochs}/{MAX_SKIPPED_EPOCHS}).")
+                        return [], [], None
+            
+            current_rows = [(hk, score, cu) for hk, score, cu, ts in enriched if cu == latest_challenge]
             logger.info(f"Using fallback challenge {latest_challenge} with {len(current_rows)} scores")
             data_source = "fallback_db"
+            logger.debug("get_weights: data_source=%s filtered current_rows=%d", data_source, len(current_rows))
             
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("DB init/fetch failure in get_weights: %s", e)
@@ -350,9 +382,24 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25, co
             continue
         if hk not in latest_per_hk:
             latest_per_hk[hk] = score  # first seen is latest
+    logger.debug("get_weights: latest_per_hk count=%d", len(latest_per_hk))
+
+    # If we are using the current challenge and every score is 0, fall back to default uid 248
+    try:
+        if data_source == "current_challenge" and latest_per_hk and all((v or 0.0) == 0.0 for v in latest_per_hk.values()):
+            logger.debug("get_weights: all zero scores for current challenge; scores=%s", list(latest_per_hk.values()))
+            logger.warning(
+                "All miner scores are 0.0 for current challenge %s. Falling back to default weight (uid 248).",
+                current_challenge_uid,
+            )
+            return [248], [1.0], current_challenge_uid
+    except NameError:
+        # Defensive: if data_source isn't defined for some reason, ignore this check
+        pass
 
     if not latest_per_hk:
         # Check if we should fall back to default weight
+        logger.debug("get_weights: no eligible miners (data_source=%s, current_rows=%d)", data_source if 'data_source' in locals() else None, len(current_rows) if 'current_rows' in locals() else 0)
         if consecutive_skipped_epochs >= MAX_SKIPPED_EPOCHS:
             logger.warning(
                 f"No eligible miner scores for latest challenge after {consecutive_skipped_epochs} epochs. "
@@ -366,6 +413,7 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25, co
             )
             return [], [], current_challenge_uid
 
+    logger.debug("get_weights: selecting winner among %d miners", len(latest_per_hk))
     winner_hk = max(latest_per_hk.keys(), key=lambda k: latest_per_hk[k])
     winner_uid = hk_to_uid.get(winner_hk, 0)
 

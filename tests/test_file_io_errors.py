@@ -48,8 +48,9 @@ class TestFileIOErrorHandling:
             revision="main", slug="test-miner", chute_id="chute1", block=100
         )
         
+        # Minimal dialogues to test file operations
         sample_dialogues = {
-            "test-miner": {
+            "test_hotkey": {
                 "dlg-1": [
                     BBPredictedUtterance(
                         index="utt-1", step=0, prefix="Test",
@@ -80,18 +81,20 @@ class TestFileIOErrorHandling:
             assert logs_dir.is_dir(), "Log path should be a directory"
 
     @pytest.mark.asyncio
-    async def test_save_score_file_permission_error(self, tmp_path):
-        """Test handling of permission errors when saving score files"""
+    @pytest.mark.skipif(os.geteuid() == 0 if hasattr(os, 'geteuid') else False, reason="Root user can write to read-only directories")
+    def test_save_score_file_permission_error(self, tmp_path):
+        """Test handling of permission errors when writing score files"""
+        from babelbit.utils.file_handling import save_dialogue_score_file
         
         scores_dir = tmp_path / "scores"
         scores_dir.mkdir()
         
-        # Make directory read-only (no write permission)
-        scores_dir.chmod(0o444)
+        # Make directory read-only
+        scores_dir.chmod(0o555)
         
         score_data = {
-            'challenge_uid': 'challenge-123',
-            'dialogue_uid': 'dlg-1',
+            'log_file': 'test.jsonl',
+            'dialogue_uid': 'test-123',
             'miner_uid': 1,
             'miner_hotkey': 'test_hotkey',
             'utterances': [],
@@ -122,10 +125,10 @@ class TestFileIOErrorHandling:
         miner2 = Miner(uid=2, hotkey="hotkey2", model="test/model2", revision="main", slug="miner-2", chute_id="chute2", block=101)
         
         dialogues = {
-            "miner-1": {
+            "hotkey1": {
                 "dlg-1": [BBPredictedUtterance(index="utt-1", step=0, prefix="Test", prediction="output", done=True, ground_truth="Test output EOF")]
             },
-            "miner-2": {
+            "hotkey2": {
                 "dlg-2": [BBPredictedUtterance(index="utt-2", step=0, prefix="Hello", prediction="world", done=True, ground_truth="Hello world EOF")]
             }
         }

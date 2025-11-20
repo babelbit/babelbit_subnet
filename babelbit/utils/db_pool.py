@@ -288,13 +288,13 @@ async def health_check() -> bool:
         logger.error("DB health check failed: %s", e)
         return False
 
-async def _iter_scores_from_db(limit: int) -> list[tuple[str, float, str]]:
+async def _iter_scores_from_db(limit: int) -> list[tuple[str, float, str, datetime]]:
     """Fetch recent per-dialogue scores from Postgres.
 
     We read from scoring_staging where file_content JSON stores miner metadata and
     dialogue_summary.average_U_best_early. Falls back gracefully if table absent.
 
-    Returns list of (hotkey, score, challenge_uid) tuples limited to `limit` most recent entries.
+    Returns list of (hotkey, score, challenge_uid, timestamp) tuples limited to `limit` most recent entries.
     """
     sql = """
         SELECT
@@ -313,14 +313,15 @@ async def _iter_scores_from_db(limit: int) -> list[tuple[str, float, str]]:
     except Exception as e:  # table may not exist yet
         logger.warning("DB score fetch failed (%s); returning empty result", e)
         return []
-    out: list[tuple[str, float, str]] = []
+    out: list[tuple[str, float, str, datetime]] = []
     for r in rows:
         hk = r.get("miner_hotkey") if isinstance(r, dict) else r[0]
         sc = r.get("score") if isinstance(r, dict) else r[1]
         cu = r.get("challenge_uid") if isinstance(r, dict) else r[2]
-        if hk and sc is not None:
+        ts = r.get("json_created_at") if isinstance(r, dict) else r[3]
+        if hk and sc is not None and ts is not None:
             try:
-                out.append((str(hk), float(sc), str(cu) if cu is not None else ""))
+                out.append((str(hk), float(sc), str(cu) if cu is not None else "", ts))
             except Exception:
                 continue
     return out

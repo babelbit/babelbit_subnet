@@ -49,7 +49,7 @@ def _char_similarity(a: str, b: str) -> float:
     b = b or ""
     mx = max(len(a), len(b))
     if mx == 0:
-        return 1.0
+        return 0.0
     ed = _edit_distance(a, b)
     return max(0.0, 1.0 - (ed / mx))
 
@@ -58,7 +58,7 @@ def _token_jaccard(a: str, b: str) -> float:
     tb = set((b or "").split())
     inter = len(ta & tb)
     union = len(ta | tb)
-    return (inter / union) if union else 1.0
+    return (inter / union) if union else 0.0
 
 # --- begin: score-log (add-only, mirrors STDOUT to a file; no logic changes) ---
 

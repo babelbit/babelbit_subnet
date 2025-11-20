@@ -56,7 +56,6 @@ test_scores/
 *.log
 
 # Development files
-tests/
 integration_tests/
 documentation/
 images/

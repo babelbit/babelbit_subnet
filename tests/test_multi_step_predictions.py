@@ -166,11 +166,11 @@ class TestMultiStepPredictions:
         multi_step_dialogue_utterances,
         temp_test_dir,
     ):
-        """Test that runner saves all prediction steps to JSONL, not just the final one"""
+        "Test that runner saves all prediction steps to JSONL, not just the final one"
         
-        # Convert to multi_miner format
+        # Convert to multi_miner format (using hotkey as key)
         multi_miner_result = {
-            test_miner.slug: multi_step_dialogue_utterances
+            test_miner.hotkey: multi_step_dialogue_utterances
         }
         
         with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
@@ -230,9 +230,9 @@ class TestMultiStepPredictions:
     ):
         """Test that scored JSON files contain multiple steps per utterance"""
         
-        # Convert to multi_miner format
+        # Convert to multi_miner format (using hotkey as key)
         multi_miner_result = {
-            test_miner.slug: multi_step_dialogue_utterances
+            test_miner.hotkey: multi_step_dialogue_utterances
         }
         
         with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
@@ -305,9 +305,9 @@ class TestMinerIdentifiersInDatabase:
         async def mock_insert_submissions(rows):
             captured_rows.extend(rows)
         
-        # Convert to multi_miner format
+        # Convert to multi_miner format (using hotkey as key)
         multi_miner_result = {
-            test_miner.slug: multi_step_dialogue_utterances
+            test_miner.hotkey: multi_step_dialogue_utterances
         }
         
         with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
@@ -380,10 +380,10 @@ class TestMinerIdentifiersInDatabase:
         
         miners = {1: miner1, 2: miner2}
         
-        # Convert to multi_miner format - each miner gets their own dialogues
+        # Convert to multi_miner format - each miner tracked by hotkey
         multi_miner_result = {
-            "miner-1": multi_step_dialogue_utterances,
-            "miner-2": multi_step_dialogue_utterances
+            "hotkey_1": multi_step_dialogue_utterances,
+            "hotkey_2": multi_step_dialogue_utterances
         }
         
         captured_rows = []

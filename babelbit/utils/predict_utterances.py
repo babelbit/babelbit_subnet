@@ -199,6 +199,12 @@ async def predict_with_utterance_engine(
         current_token = first_token
         current_utterance_tokens = []
         current_utterance_index = utterance_index
+        first_token_processed = False  # Track if we've processed the first token
+        
+        # Add the first token to the utterance tokens if it's not a boundary token
+        if first_token and first_token not in ("EOF", "EOF EOF"):
+            current_utterance_tokens.append(first_token)
+            logger.debug(f"Added first token '{first_token}' to utterance {current_utterance_index}")
         
         while not session_complete:
             # Handle dialogue/utterance initialization
@@ -215,9 +221,14 @@ async def predict_with_utterance_engine(
             
             # Process current token
             if current_token and current_token not in ("EOF", "EOF EOF"):
-                # Regular token - add to current utterance
-                current_utterance_tokens.append(current_token)
-                logger.debug(f"Added token '{current_token}' to utterance {current_utterance_index}")
+                # Regular token - add to current utterance (skip if it's the first token already added)
+                if not (current_token == first_token and not first_token_processed):
+                    current_utterance_tokens.append(current_token)
+                    logger.debug(f"Added token '{current_token}' to utterance {current_utterance_index}")
+                
+                # Mark first token as processed after we handle it
+                if current_token == first_token:
+                    first_token_processed = True
                 
                 # Get prediction for complete utterance if we have a chute
                 prediction_text = ""
@@ -269,6 +280,15 @@ async def predict_with_utterance_engine(
                                 f"Chute prediction failed - {consecutive_prediction_errors} consecutive errors "
                                 f"(max: {max_prediction_errors}): {result.error}"
                             )
+                            logger.debug(
+                                "Chute fail details: slug=%s utt_idx=%d tokens=%d prefix='%s' ctx_len=%d err=%s",
+                                chute_slug,
+                                current_utterance_index,
+                                len(current_utterance_tokens),
+                                prefix_text[:120] if prefix_text else "",
+                                len(context_memory.split(" EOF ")) if context_memory else 0,
+                                str(result.error)[:200] if result.error else None,
+                            )
                             
                             if consecutive_prediction_errors >= max_prediction_errors:
                                 error_msg = (
@@ -287,6 +307,19 @@ async def predict_with_utterance_engine(
                             f"Error calling chute - {consecutive_prediction_errors} consecutive errors "
                             f"(max: {max_prediction_errors}): {e}"
                         )
+                        try:
+                            logger.debug(
+                                "Chute exception details: slug=%s utt_idx=%d tokens=%d prefix='%s' ctx_len=%d err_type=%s err='%s'",
+                                chute_slug,
+                                current_utterance_index,
+                                len(current_utterance_tokens),
+                                prefix_text[:120] if prefix_text else "",
+                                len(context_memory.split(" EOF ")) if context_memory else 0,
+                                type(e).__name__,
+                                str(e)[:300],
+                            )
+                        except Exception:
+                            pass
                         
                         if consecutive_prediction_errors >= max_prediction_errors:
                             error_msg = (
@@ -448,11 +481,15 @@ async def predict_with_utterance_engine_multi_miner(
     session = await get_async_client()
     headers = await get_auth_headers()
     
+    # Helper to get unique identifier for a miner (use hotkey since it exists for all miners)
+    def get_miner_key(miner):
+        return miner.hotkey
+    
     # Initialize tracking structures for all miners
-    miner_dialogues = {m.slug: {} for m in miners}  # miner_slug -> {dialogue_uid -> [steps]}
-    miner_contexts = {m.slug: {} for m in miners}   # miner_slug -> {dialogue_uid -> context_str}
-    miner_error_counts = {m.slug: 0 for m in miners}  # Track consecutive errors per miner
-    miner_active = {m.slug: True for m in miners}  # Track which miners are still active
+    miner_dialogues = {get_miner_key(m): {} for m in miners}  # miner_key -> {dialogue_uid -> [steps]}
+    miner_contexts = {get_miner_key(m): {} for m in miners}   # miner_key -> {dialogue_uid -> context_str}
+    miner_error_counts = {get_miner_key(m): 0 for m in miners}  # Track consecutive errors per miner
+    miner_active = {get_miner_key(m): True for m in miners}  # Track which miners are still active
     
     async def _call_start():
         """Helper to call /start endpoint with retry logic"""
@@ -516,10 +553,11 @@ async def predict_with_utterance_engine_multi_miner(
                 
                 # Initialize dialogue tracking for all miners
                 for miner in miners:
-                    if dialogue_uid not in miner_dialogues[miner.slug]:
-                        miner_dialogues[miner.slug][dialogue_uid] = []
-                    if dialogue_uid not in miner_contexts[miner.slug]:
-                        miner_contexts[miner.slug][dialogue_uid] = ""
+                    miner_key = get_miner_key(miner)
+                    if dialogue_uid not in miner_dialogues[miner_key]:
+                        miner_dialogues[miner_key][dialogue_uid] = []
+                    if dialogue_uid not in miner_contexts[miner_key]:
+                        miner_contexts[miner_key][dialogue_uid] = ""
             
             # Process current token
             if current_token and current_token not in ("EOF", "EOF EOF"):
@@ -546,6 +584,22 @@ async def predict_with_utterance_engine_multi_miner(
                 active_count = sum(1 for a in miner_active.values() if a)
                 if active_count == 0:
                     logger.warning(f"[Utterance {current_utterance_index} Step {step_num}] All miners deactivated, stopping session early")
+                    
+                    # Before breaking, save ground truth for any incomplete utterance
+                    if current_utterance_tokens and current_dialogue_uid:
+                        ground_truth_text = " ".join(current_utterance_tokens)
+                        logger.info(f"[Utterance {current_utterance_index}] Saving ground truth for incomplete utterance: '{ground_truth_text}'")
+                        
+                        for miner in miners:
+                            miner_key = get_miner_key(miner)
+                            # Mark last step with ground truth for incomplete utterance
+                            if current_dialogue_uid in miner_dialogues[miner_key]:
+                                steps = miner_dialogues[miner_key][current_dialogue_uid]
+                                if steps:
+                                    steps[-1].ground_truth = ground_truth_text
+                                    # Note: We don't set done=True since the utterance is incomplete
+                                    logger.debug(f"Set ground_truth for miner {miner.slug} last step in dialogue {current_dialogue_uid}")
+                    
                     break
                 
                 # Query ALL active miners in parallel for this step
@@ -554,10 +608,11 @@ async def predict_with_utterance_engine_multi_miner(
                 # Create prediction tasks for all active miners
                 prediction_tasks = []
                 for miner in miners:
-                    if not miner_active[miner.slug]:
+                    miner_key = get_miner_key(miner)
+                    if not miner_active[miner_key]:
                         continue  # Skip inactive miners
                         
-                    context = miner_contexts[miner.slug].get(current_dialogue_uid, "")
+                    context = miner_contexts[miner_key].get(current_dialogue_uid, "")
                     
                     payload = BBPredictedUtterance(
                         index=session_id,
@@ -596,8 +651,17 @@ async def predict_with_utterance_engine_multi_miner(
                     logger.warning(f"[Utterance {current_utterance_index} Step {step_num}] Timeout waiting for miner predictions after {effective_timeout:.1f}s")
                     # Create timeout exceptions for all tasks
                     results = [asyncio.TimeoutError(f"Prediction timeout after {effective_timeout:.1f}s") for _ in prediction_tasks]
+                    logger.debug(
+                        "[Utterance %d Step %d] Timeout details: tasks=%d timeout=%.2fs",
+                        current_utterance_index,
+                        step_num,
+                        len(prediction_tasks),
+                        effective_timeout,
+                    )
                 
                 for (miner, _), result in zip(prediction_tasks, results):
+                    miner_key = get_miner_key(miner)
+                    miner_id = miner.slug or f"uid_{miner.uid}"
                     try:
                         if isinstance(result, Exception):
                             raise result
@@ -605,9 +669,9 @@ async def predict_with_utterance_engine_multi_miner(
                         prediction_text = result if isinstance(result, str) else ""
                         
                         # Success - reset error counter
-                        if miner_error_counts[miner.slug] > 0:
-                            logger.info(f"[Utterance {current_utterance_index} Step {step_num}] Miner {miner.slug} recovered after {miner_error_counts[miner.slug]} errors")
-                            miner_error_counts[miner.slug] = 0
+                        if miner_error_counts[miner_key] > 0:
+                            logger.info(f"[Utterance {current_utterance_index} Step {step_num}] Miner {miner_id} recovered after {miner_error_counts[miner_key]} errors")
+                            miner_error_counts[miner_key] = 0
                         
                         # Store this prediction step
                         step_utterance = BBPredictedUtterance(
@@ -615,34 +679,63 @@ async def predict_with_utterance_engine_multi_miner(
                             step=len(current_utterance_tokens) - 1,
                             prefix=prefix_text,
                             prediction=prediction_text,
-                            context=miner_contexts[miner.slug].get(current_dialogue_uid, ""),
+                            context=miner_contexts[miner_key].get(current_dialogue_uid, ""),
                             done=False,
                         )
-                        miner_dialogues[miner.slug][current_dialogue_uid].append(step_utterance)
+                        miner_dialogues[miner_key][current_dialogue_uid].append(step_utterance)
                         
-                        logger.debug(f"[Utterance {current_utterance_index} Step {step_num}] Miner {miner.slug} predicted: '{prediction_text[:50]}...'")
+                        logger.debug(f"[Utterance {current_utterance_index} Step {step_num}] Miner {miner_id} predicted: '{prediction_text[:50]}...'")
                         
                     except Exception as e:
                         # Handle per-miner errors
-                        miner_error_counts[miner.slug] += 1
+                        miner_error_counts[miner_key] += 1
                         
                         # Only log warning every 5 errors to reduce noise, or when approaching limit
-                        if (miner_error_counts[miner.slug] % 5 == 1 or 
-                            miner_error_counts[miner.slug] >= max_prediction_errors - 2):
+                        if (miner_error_counts[miner_key] % 5 == 1 or 
+                            miner_error_counts[miner_key] >= max_prediction_errors - 2):
                             error_msg = str(e)
                             # Truncate very long error messages
                             if len(error_msg) > 200:
                                 error_msg = error_msg[:200] + "..."
                             logger.warning(
-                                f"[Utterance {current_utterance_index} Step {step_num}] Miner {miner.slug} prediction failed "
-                                f"({miner_error_counts[miner.slug]}/{max_prediction_errors}): {error_msg}"
+                                f"[Utterance {current_utterance_index} Step {step_num}] Miner {miner_id} prediction failed "
+                                f"({miner_error_counts[miner_key]}/{max_prediction_errors}): {error_msg}"
                             )
+                        # Always emit a debug line with rich failure context
+                        try:
+                            logger.debug(
+                                "[Utterance %d Step %d] Miner fail: miner_id=%s hk=%s dlg=%s errs=%d/%d err_type=%s err='%s' prefix='%s'",
+                                current_utterance_index,
+                                step_num,
+                                miner_id,
+                                miner.hotkey[:16] + "..." if getattr(miner, 'hotkey', None) else None,
+                                current_dialogue_uid,
+                                miner_error_counts[miner_key],
+                                max_prediction_errors,
+                                type(e).__name__,
+                                str(e)[:300],
+                                prefix_text[:120] if prefix_text else "",
+                            )
+                        except Exception:
+                            pass
                         
-                        if miner_error_counts[miner.slug] >= max_prediction_errors:
-                            miner_active[miner.slug] = False
+                        if miner_error_counts[miner_key] >= max_prediction_errors:
+                            miner_active[miner_key] = False
                             logger.error(
-                                f"[Utterance {current_utterance_index} Step {step_num}] Deactivating miner {miner.slug} after {max_prediction_errors} consecutive errors"
+                                f"[Utterance {current_utterance_index} Step {step_num}] Deactivating miner {miner_id} after {max_prediction_errors} consecutive errors"
                             )
+                            try:
+                                deactivated = sum(1 for a in miner_active.values() if not a)
+                                logger.debug(
+                                    "[Utterance %d Step %d] Deactivated miner %s (total deactivated=%d/%d)",
+                                    current_utterance_index,
+                                    step_num,
+                                    miner_id,
+                                    deactivated,
+                                    len(miners),
+                                )
+                            except Exception:
+                                pass
                         
                         # Store empty prediction for failed step
                         step_utterance = BBPredictedUtterance(
@@ -650,10 +743,10 @@ async def predict_with_utterance_engine_multi_miner(
                             step=len(current_utterance_tokens) - 1,
                             prefix=prefix_text,
                             prediction="",
-                            context=miner_contexts[miner.slug].get(current_dialogue_uid, ""),
+                            context=miner_contexts[miner_key].get(current_dialogue_uid, ""),
                             done=False,
                         )
-                        miner_dialogues[miner.slug][current_dialogue_uid].append(step_utterance)
+                        miner_dialogues[miner_key][current_dialogue_uid].append(step_utterance)
                 
                 # Wait for target block if we finished early
                 if step_target_block and subtensor:
@@ -679,19 +772,20 @@ async def predict_with_utterance_engine_multi_miner(
                     ground_truth_text = " ".join(current_utterance_tokens)
                     
                     for miner in miners:
-                        # Mark last step as done and add ground truth
-                        if current_dialogue_uid in miner_dialogues[miner.slug]:
-                            steps = miner_dialogues[miner.slug][current_dialogue_uid]
+                        miner_key = get_miner_key(miner)
+                        # Mark last step for this miner as complete with ground truth
+                        if current_dialogue_uid in miner_dialogues[miner_key]:
+                            steps = miner_dialogues[miner_key][current_dialogue_uid]
                             if steps:
                                 steps[-1].done = True
                                 steps[-1].ground_truth = ground_truth_text
                         
-                        # Update context with completed utterance
-                        if current_dialogue_uid in miner_contexts[miner.slug]:
-                            if miner_contexts[miner.slug][current_dialogue_uid]:
-                                miner_contexts[miner.slug][current_dialogue_uid] += f" EOF {ground_truth_text}"
+                        # Update the context for this miner with the completed utterance
+                        if current_dialogue_uid in miner_contexts[miner_key]:
+                            if miner_contexts[miner_key][current_dialogue_uid]:
+                                miner_contexts[miner_key][current_dialogue_uid] += f" EOF {ground_truth_text}"
                             else:
-                                miner_contexts[miner.slug][current_dialogue_uid] = ground_truth_text
+                                miner_contexts[miner_key][current_dialogue_uid] = ground_truth_text
                     
                     logger.info(f"Completed utterance {current_utterance_index} with {len(current_utterance_tokens)} tokens")
                 

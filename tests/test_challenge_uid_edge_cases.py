@@ -67,7 +67,7 @@ class TestChallengeUIDEdgeCases:
         )
         
         dialogues = {
-            "test-miner": {
+            "test_hotkey": {
                 "dlg-1": [
                     BBPredictedUtterance(
                         index="utt-1", step=0, prefix="Test",
@@ -215,7 +215,7 @@ class TestChallengeUIDEdgeCases:
         )
         
         dialogues = {
-            "test-miner": {
+            "test_hotkey": {
                 "dlg-1": [
                     BBPredictedUtterance(
                         index="utt-1", step=0, prefix="Test",
@@ -266,7 +266,7 @@ class TestChallengeUIDEdgeCases:
         )
         
         dialogues = {
-            "test-miner": {
+            "test_hotkey": {
                 "dlg-1": [
                     BBPredictedUtterance(
                         index="utt-1", step=0, prefix="Test",
@@ -350,7 +350,7 @@ class TestChallengeUIDEdgeCases:
         )
         
         dialogues = {
-            "test-miner": {
+            "test_hotkey": {
                 "dlg-1": [
                     BBPredictedUtterance(
                         index="utt-1", step=0, prefix="Test",

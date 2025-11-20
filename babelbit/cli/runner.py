@@ -86,6 +86,10 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
     scores_dir = Path(output_dir or os.getenv("BB_OUTPUT_SCORES_DIR", "scores"))
     logs_dir.mkdir(parents=True, exist_ok=True)
     scores_dir.mkdir(parents=True, exist_ok=True)
+    logger.debug(
+        "[runner] output dirs ready: logs_dir=%s scores_dir=%s (output_dir_arg=%s)",
+        str(logs_dir), str(scores_dir), str(output_dir),
+    )
 
     # Database write configuration (opt-in so tests / local runs without PG don't fail)
     db_enabled = os.getenv("BB_ENABLE_DB_WRITES", "0").lower() in {"1", "true", "yes"}
@@ -98,6 +102,7 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
         except Exception as e:
             logger.warning("DB initialization failed; disabling DB writes: %s", e)
             db_ready = False
+    logger.debug("[runner] DB writes enabled=%s ready=%s", db_enabled, db_ready)
 
     s3_enabled = os.getenv("BB_ENABLE_S3_UPLOADS", "0").lower() in {"1", "true", "yes"}
     global s3_manager
@@ -118,12 +123,14 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
         except Exception as e:
             logger.warning("S3 Manager initialization failed; disabling S3 uploads: %s", e)
             s3_manager = None
+    logger.debug("[runner] S3 uploads enabled=%s active=%s", s3_enabled, bool(s3_manager))
 
     try:
         challenge_uid = await get_current_challenge_uid(utterance_engine_url)
     except Exception as e:
         logger.warning(f"Could not get current challenge ID: {e}")
         return
+    logger.debug("[runner] fetched challenge_uid=%s from %s", challenge_uid, utterance_engine_url)
 
     # Prevents runner loop from running multiple times a challenge
     if challenge_uid:
@@ -136,6 +143,7 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
             return
         else:
             logger.info(f"Challenge {challenge_uid}: No existing scores found, proceeding with miner evaluation")
+            logger.debug("[runner] already_processed=%s", list(already_processed) if already_processed else [])
 
     try:
         miners = await get_miners_from_registry(NETUID, subtensor=subtensor)
@@ -147,6 +155,10 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
         miner_list = list(miners.values())
         random.shuffle(miner_list)
         miner_list = miner_list[: min(MAX_MINERS, len(miner_list))]
+        logger.debug(
+            "[runner] miners selected=%d (max=%d)",
+            len(miner_list), MAX_MINERS,
+        )
 
         if not miner_list:
             logger.info("No miners to process after filtering")
@@ -183,12 +195,13 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
                     logger.warning(f"Miner {miner.uid} chute error: {e}, trying axon fallback")
             if miner.axon_ip and miner.axon_port:
                 try:
-                    # Call via Axon endpoint
+                    # Call via Axon endpoint with Bittensor protocol
                     result = await call_miner_axon_endpoint(
                         axon_ip=miner.axon_ip,
                         axon_port=miner.axon_port,
                         payload=payload,
                         context_used=context,
+                        miner_hotkey=miner.hotkey,
                         timeout=chutes_timeout
                     )
                     
@@ -205,7 +218,10 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
         logger.info(f"Starting shared utterance session for {len(miner_list)} miners")
         
         # Get step block modulo from environment (default: 1 block)
-        step_block_modulo = int(os.getenv("BB_STEP_BLOCK_MODULO", "1"))
+        step_block_modulo = int(os.getenv("BB_STEP_BLOCK_MODULO", "2"))
+        logger.debug(
+            "[runner] session params: timeout=%.2fs step_block_modulo=%d", chutes_timeout, step_block_modulo
+        )
         
         miner_dialogues = await predict_with_utterance_engine_multi_miner(
             utterance_engine_url=utterance_engine_url,
@@ -216,6 +232,15 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
             subtensor=subtensor,
             step_block_modulo=step_block_modulo
         )
+        try:
+            miners_with_dialogues = len(miner_dialogues or {})
+            total_dialogues = sum(len(v) for v in (miner_dialogues or {}).values())
+            logger.debug(
+                "[runner] multi-miner collected: miners_with_dialogues=%d total_dialogues=%d",
+                miners_with_dialogues, total_dialogues,
+            )
+        except Exception:
+            pass
         
         # Track statistics for challenge status
         total_miners_processed = 0
@@ -225,17 +250,43 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
         # Now score each miner's dialogues
         for m in miner_list:
             try:
-                if not m.slug:
-                    logger.warning(f"Miner has no slug, skipping scoring")
-                    continue
+                # Use hotkey as the key (matches what predict_utterances uses)
+                miner_key = m.hotkey
+                miner_id = m.slug or f"uid_{m.uid}"
                     
-                dialogues = miner_dialogues.get(m.slug, {})
+                dialogues = miner_dialogues.get(miner_key, {})
+                # Backward compatibility: some callers/tests key by slug
+                if not dialogues and getattr(m, "slug", None):
+                    fallback_key = m.slug
+                    dialogues = miner_dialogues.get(fallback_key, {})
+                    if dialogues:
+                        logger.debug("[runner] miner %s: using slug key fallback for dialogues", miner_id)
+                logger.debug(
+                    "[runner] miner uid=%s hk=%s dialogues_count=%d",
+                    getattr(m, 'uid', '?'), (m.hotkey[:16] + '...'), len(dialogues or {}),
+                )
                 
                 if not dialogues:
-                    logger.warning(f"Miner {m.slug} has no dialogues to score")
+                    logger.warning(f"Miner {miner_id} (uid: {m.uid}, hotkey: {m.hotkey[:16]}...) has no dialogues to score")
                     continue
                 
-                logger.info(f"Processing {len(dialogues)} dialogues for miner {m.slug} (uid: {getattr(m, 'uid', None)}, hotkey: {getattr(m, 'hotkey', None)})")
+                # Check if miner has any valid predictions before scoring
+                has_valid_predictions = False
+                for dialogue_uid, utterance_steps in dialogues.items():
+                    for step in utterance_steps:
+                        prediction = getattr(step, 'prediction', '') or ''
+                        if prediction.strip():  # Non-empty prediction
+                            has_valid_predictions = True
+                            break
+                    if has_valid_predictions:
+                        break
+                
+                if not has_valid_predictions:
+                    logger.warning(f"Miner {miner_id} (uid: {m.uid}) has no valid predictions across {len(dialogues)} dialogues - skipping scoring")
+                    logger.debug("[runner] miner %s invalid/empty predictions; skipping", miner_id)
+                    continue
+                
+                logger.info(f"Processing {len(dialogues)} dialogues for miner {miner_id} (uid: {m.uid}, hotkey: {m.hotkey[:16]}...)")
                 
                 dialogue_scores: List[float] = []
                 dialogue_uids: List[str] = []
@@ -243,12 +294,28 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
                 # Emit raw JSONL events per dialogue then score
                 for dialogue_uid, utterance_steps in dialogues.items():
                     dialogue_uids.append(dialogue_uid)
-                    logger.info(f"Miner {m.slug} produced {len(utterance_steps)} utterance steps in dialogue {dialogue_uid}")
+                    logger.info(f"Miner {miner_id} produced {len(utterance_steps)} utterance steps in dialogue {dialogue_uid}")
                     complete_utterances = group_steps_into_utterances(utterance_steps)
                     logger.info(f"Dialogue {dialogue_uid} contains {len(complete_utterances)} complete utterances")
                     events_path = logs_dir / f"dialogue_run_{challenge_uid or 'unknown'}_miner_{m.uid}__hk_{m.hotkey}__dlg_{dialogue_uid}.jsonl"
                     with events_path.open("w", encoding="utf-8") as jf:
                         for utt_index, utt_steps in enumerate(complete_utterances):
+                            # Validate ground truth before writing events
+                            gt = getattr(utt_steps[-1], 'ground_truth', '') or ''
+                            
+                            # Skip utterances with empty ground truth (timeout/early termination)
+                            if not gt.strip():
+                                logger.warning(
+                                    f"Skipping utterance {utt_index} in dialogue {dialogue_uid} for miner {miner_id} - "
+                                    f"empty ground_truth (likely timeout or early session termination)"
+                                )
+                                logger.debug(
+                                    "[runner] skipped utt_index=%d (empty GT) in dialogue=%s miner=%s",
+                                    utt_index, dialogue_uid, miner_id,
+                                )
+                                continue
+                            
+                            # Write prediction steps
                             for step_idx, step_obj in enumerate(utt_steps):
                                 jf.write(json.dumps({
                                     "event": "predicted",
@@ -256,13 +323,15 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
                                     "step": step_idx,
                                     "prediction": getattr(step_obj, 'prediction', '') or ''
                                 }) + "\n")
-                            gt = getattr(utt_steps[-1], 'ground_truth', '') or ''
+                            
+                            # Write utterance completion with validated ground truth
                             jf.write(json.dumps({
                                 "event": "utterance_complete",
                                 "utterance_index": utt_index,
                                 "ground_truth": gt
                             }) + "\n")
                     logger.info(f"[runner] Wrote raw dialogue log: {events_path}")
+                    logger.debug("[runner] events_path size=%d bytes", events_path.stat().st_size if events_path.exists() else -1)
                     # Optionally, write raw events JSON to S3
                     if s3_manager:
                         # Upload to bucket/logs/ directory structure
@@ -275,6 +344,10 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
                         continue
                     try:
                         scored_doc = score_jsonl(events_path)
+                        logger.debug(
+                            "[runner] score_jsonl produced %d utterances for dialogue %s",
+                            len(scored_doc.get("utterances", [])), dialogue_uid,
+                        )
                         # augment metadata
                         scored_doc.update({
                             "challenge_uid": challenge_uid,
@@ -300,6 +373,7 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
                                     file_path=str(score_path),
                                     json_created_at=now_utc,
                                 )
+                                logger.debug("[runner] inserted scoring_staging id=%s for dialogue %s", str(staging_id), dialogue_uid)
                             except Exception as e:
                                 logger.warning("Failed to insert scoring_staging row: %s", e)
                                 staging_id = None
@@ -326,6 +400,7 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
                                             "staging_inserted_at": now_ts,
                                         })
                                     await insert_scoring_submissions_bulk(rows)
+                                    logger.debug("[runner] inserted scoring_submissions rows=%d (dialogue %s)", len(rows), dialogue_uid)
                                 except Exception as e:
                                     logger.warning("Failed bulk insert scoring_submissions: %s", e)
                     except Exception as e:
@@ -346,6 +421,10 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
                             "challenge_mean_U": miner_mean_score,
                         }
                         summary_path = save_challenge_summary_file(summary, output_dir=str(scores_dir))
+                        logger.debug(
+                            "[runner] saved challenge summary for miner %s: path=%s dialogues=%d mean=%.4f",
+                            miner_id, str(summary_path), len(dialogue_scores), miner_mean_score,
+                        )
                         
                         # Track statistics for challenge status
                         total_miners_processed += 1
@@ -366,10 +445,13 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
                                     file_path=str(summary_path),
                                     json_created_at=now_utc,
                                 )
+                                logger.debug("[runner] inserted summary into scoring_staging for miner %s", miner_id)
                             except Exception as e:
                                 logger.warning("Failed to insert challenge summary scoring_staging: %s", e)
                     except Exception as e:
                         logger.warning("Failed to save challenge summary for miner %s: %s", getattr(m,'uid', '?'), e)
+                else:
+                    logger.debug("[runner] no dialogue scores for miner %s", miner_id)
 
             except Exception as e:
                 logger.warning(
@@ -393,6 +475,11 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
                     "logs_dir": str(logs_dir),
                 }
             )
+            logger.debug(
+                "[runner] challenge processed: uid=%s miners=%d dialogues=%d mean=%s",
+                challenge_uid, total_miners_processed, total_dialogues_processed,
+                (f"{overall_mean:.4f}" if overall_mean is not None else "N/A"),
+            )
             mean_score_str = f"{overall_mean:.4f}" if overall_mean is not None else "N/A"
             logger.info(
                 f"Challenge {challenge_uid} completed: {total_miners_processed} miners, "
@@ -414,9 +501,9 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
 
 
 async def runner_loop():
-    """Runs `runner()` every N blocks (default: 1080)."""
+    """Runs `runner()` every N blocks (default: 2160)."""
     settings = get_settings()
-    TEMPO = int(os.getenv("BABELBIT_RUNNER_TEMPO", "1080"))
+    TEMPO = int(os.getenv("BABELBIT_RUNNER_TEMPO", "2160"))
     MAX_SUBTENSOR_RETRIES = int(os.getenv("BABELBIT_MAX_SUBTENSOR_RETRIES", "5"))
 
     st = None

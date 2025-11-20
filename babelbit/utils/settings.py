@@ -142,8 +142,6 @@ def get_settings() -> Settings:
         # Development / local testing flags
         BB_DEV_MODE=getenv("BB_DEV_MODE", "0").lower() in ("1", "true", "yes"),
         BB_LOCAL_MINER_IP=getenv("BB_LOCAL_MINER_IP", ""),
-        
-        
 
         FILENAME_BB_MAIN=getenv("FILENAME_BB_MAIN", "chute.py.j2"),
         FILENAME_BB_SCHEMAS=getenv("FILENAME_BB_SCHEMAS", "schemas.py"),

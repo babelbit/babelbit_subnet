@@ -6,6 +6,7 @@ Tests cover:
 1. Partial utterance list completion
 2. Mixed success/failure across miners
 3. Score aggregation with missing data
+4. Empty ground truth handling (timeout scenarios)
 """
 import pytest
 import asyncio
@@ -39,7 +40,7 @@ class TestPartialScoringFailures:
         
         # Utterance steps without final done=True (incomplete)
         incomplete_utterances = {
-            "test-miner": {
+            "test_hotkey": {
                 "dlg-1": [
                     BBPredictedUtterance(
                         index="utt-1", step=0, prefix="Hello",
@@ -115,13 +116,13 @@ class TestPartialScoringFailures:
         
         # Mixed results: miner-1 succeeds, miner-2 has no dialogues, miner-3 succeeds
         mixed_results = {
-            "miner-1": {
+            "hotkey1": {
                 "dlg-1": [
                     BBPredictedUtterance(index="utt-1", step=0, prefix="Test", prediction="1", done=True, ground_truth="Test 1 EOF")
                 ]
             },
-            "miner-2": {},  # No dialogues (failure case)
-            "miner-3": {
+            "hotkey2": {},  # No dialogues (failure case)
+            "hotkey3": {
                 "dlg-2": [
                     BBPredictedUtterance(index="utt-1", step=0, prefix="Test", prediction="3", done=True, ground_truth="Test 3 EOF")
                 ]
@@ -171,7 +172,7 @@ class TestPartialScoringFailures:
         
         # Multiple dialogues
         multi_dialogues = {
-            "test-miner": {
+            "test_hotkey": {
                 "dlg-1": [BBPredictedUtterance(index="utt-1", step=0, prefix="Test", prediction="1", done=True, ground_truth="Test 1 EOF")],
                 "dlg-2": [BBPredictedUtterance(index="utt-2", step=0, prefix="Test", prediction="2", done=True, ground_truth="Test 2 EOF")],
                 "dlg-3": [BBPredictedUtterance(index="utt-3", step=0, prefix="Test", prediction="3", done=True, ground_truth="Test 3 EOF")],
@@ -228,7 +229,7 @@ class TestPartialScoringFailures:
         )
         
         multi_dialogues = {
-            "test-miner": {
+            "test_hotkey": {
                 "dlg-1": [BBPredictedUtterance(index="utt-1", step=0, prefix="Test", prediction="1", done=True, ground_truth="Test 1 EOF")],
                 "dlg-2": [BBPredictedUtterance(index="utt-2", step=0, prefix="Test", prediction="2", done=True, ground_truth="Test 2 EOF")],
                 "dlg-3": [BBPredictedUtterance(index="utt-3", step=0, prefix="Test", prediction="3", done=True, ground_truth="Test 3 EOF")],
@@ -281,7 +282,7 @@ class TestPartialScoringFailures:
 
     @pytest.mark.asyncio
     async def test_runner_handles_miner_with_no_slug(self, tmp_path):
-        """Test that runner handles miners without slug gracefully"""
+        """Test that runner handles miners without slug (axon-only miners) properly"""
         
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
@@ -290,20 +291,25 @@ class TestPartialScoringFailures:
         logs_dir = tmp_path / "logs"
         scores_dir = tmp_path / "scores"
         
-        # Miner without slug
+        # Axon-only miner without slug (should still be scored using hotkey)
         miner_no_slug = Miner(
-            uid=1, hotkey="test_hotkey", model="test/model",
-            revision="main", slug=None, chute_id="chute1", block=100
+            uid=1, hotkey="test_hotkey_axon", model=None,
+            revision=None, slug=None, chute_id=None, block=100,
+            axon_ip="192.168.1.1", axon_port=8091
         )
         
         miner_with_slug = Miner(
-            uid=2, hotkey="test_hotkey2", model="test/model2",
+            uid=2, hotkey="test_hotkey_chute", model="test/model2",
             revision="main", slug="valid-miner", chute_id="chute2", block=101
         )
         
+        # Both miners get tracked by hotkey now
         dialogues = {
-            "valid-miner": {
-                "dlg-1": [BBPredictedUtterance(index="utt-1", step=0, prefix="Test", prediction="output", done=True, ground_truth="Test output EOF")]
+            "test_hotkey_axon": {
+                "dlg-1": [BBPredictedUtterance(index="utt-1", step=0, prefix="Test", prediction="axon_output", done=True, ground_truth="Test axon_output EOF")]
+            },
+            "test_hotkey_chute": {
+                "dlg-2": [BBPredictedUtterance(index="utt-2", step=0, prefix="Test", prediction="chute_output", done=True, ground_truth="Test chute_output EOF")]
             }
         }
         
@@ -320,13 +326,15 @@ class TestPartialScoringFailures:
                 'BB_OUTPUT_LOGS_DIR': str(logs_dir),
                 'BB_OUTPUT_SCORES_DIR': str(scores_dir)
             }):
-                # Should skip miner without slug but process valid miner
+                # Both miners should now be scored (using hotkey as key)
                 await runner()
             
-            # Should only have scores for valid miner
+            # Both miners should have scores
             score_files = list(scores_dir.glob("*-score.json"))
+            miner1_files = [f for f in score_files if "_miner_1_" in f.name]
             miner2_files = [f for f in score_files if "_miner_2_" in f.name]
-            assert len(miner2_files) > 0, "Valid miner should have score files"
+            assert len(miner1_files) > 0, "Axon miner (no slug) should now have score files"
+            assert len(miner2_files) > 0, "Chute miner (with slug) should have score files"
 
     @pytest.mark.asyncio
     async def test_runner_handles_empty_utterance_list(self, tmp_path):
@@ -346,7 +354,7 @@ class TestPartialScoringFailures:
         
         # Dialogue with empty utterance list
         empty_dialogues = {
-            "test-miner": {
+            "test_hotkey": {
                 "dlg-empty": []  # No utterances
             }
         }
@@ -413,7 +421,7 @@ class TestPartialScoringFailures:
         
         # Miner with dialogues but all scoring fails
         dialogues = {
-            "test-miner": {
+            "test_hotkey": {
                 "dlg-1": [BBPredictedUtterance(index="utt-1", step=0, prefix="Test", prediction="1", done=True, ground_truth="Test 1 EOF")],
             }
         }
@@ -440,6 +448,159 @@ class TestPartialScoringFailures:
             summary_files = list(scores_dir.glob("challenge_run_*.json"))
             # Current implementation may still create summary, but ideally shouldn't
             # Test documents the current behavior
+
+    def test_scoring_functions_handle_empty_strings(self):
+        """Test that scoring functions return 0.0 for empty comparisons"""
+        from babelbit.test_scripts.score_dialogue import _char_similarity, _token_jaccard
+        
+        # Empty ground truth with empty prediction should score 0.0
+        assert _char_similarity("", "") == 0.0, "Empty strings should score 0.0"
+        assert _token_jaccard("", "") == 0.0, "Empty strings should score 0.0"
+        
+        # Empty ground truth with prediction should score 0.0
+        assert _char_similarity("", "hello world") == 0.0
+        assert _token_jaccard("", "hello world") == 0.0
+        
+        # Ground truth with empty prediction should score 0.0
+        assert _char_similarity("hello world", "") == 0.0
+        assert _token_jaccard("hello world", "") == 0.0
+
+    def test_score_jsonl_with_empty_ground_truth(self, tmp_path):
+        """Test that score_jsonl gives 0.0 score for empty ground truth"""
+        from babelbit.test_scripts.score_dialogue import score_jsonl
+        
+        jsonl_path = tmp_path / "test_empty_gt.jsonl"
+        with jsonl_path.open("w") as f:
+            f.write(json.dumps({"event": "predicted", "utterance_index": 0, "step": 0, "prediction": ""}) + "\n")
+            f.write(json.dumps({"event": "utterance_complete", "utterance_index": 0, "ground_truth": ""}) + "\n")
+        
+        result = score_jsonl(jsonl_path, show_steps=False)
+        avg_score = result["dialogue_summary"]["average_U_best_early"]
+        
+        # Empty ground truth should result in 0.0 score
+        assert avg_score == 0.0, f"Empty GT should give 0.0, got {avg_score}"
+
+    @pytest.mark.asyncio
+    async def test_runner_skips_empty_ground_truth_utterances(self, tmp_path):
+        """Test that runner skips utterances with empty ground truth"""
+        mock_settings = Mock()
+        mock_settings.BABELBIT_NETUID = 42
+        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.S3_LOG_DIR = "logs"
+        
+        logs_dir = tmp_path / "logs"
+        scores_dir = tmp_path / "scores"
+        
+        sample_miner = Miner(
+            uid=1, hotkey="test_hotkey", model="test/model",
+            revision="main", slug="test-miner", chute_id="chute1", block=100
+        )
+        
+        # Utterance with empty ground truth (timeout scenario)
+        empty_gt_dialogues = {
+            "test_hotkey": {
+                "dlg-timeout": [
+                    BBPredictedUtterance(
+                        index="utt-1", step=0, prefix="Hello",
+                        prediction="world", done=True,
+                        ground_truth=""  # Empty due to timeout
+                    )
+                ]
+            }
+        }
+        
+        with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
+             patch('babelbit.cli.runner.init_utterance_auth'), \
+             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock), \
+             patch('babelbit.cli.runner.get_current_challenge_uid', new_callable=AsyncMock, return_value="challenge-empty-gt"), \
+             patch('babelbit.cli.runner.get_miners_from_registry', new_callable=AsyncMock, return_value={1: sample_miner}), \
+             patch('babelbit.cli.runner.predict_with_utterance_engine_multi_miner', new_callable=AsyncMock, return_value=empty_gt_dialogues), \
+             patch('babelbit.cli.runner.close_http_clients'):
+            
+            with patch.dict('os.environ', {
+                'BB_OUTPUT_LOGS_DIR': str(logs_dir),
+                'BB_OUTPUT_SCORES_DIR': str(scores_dir)
+            }):
+                await runner()
+            
+            # Verify empty ground truth was skipped
+            log_files = list(logs_dir.glob("*.jsonl"))
+            assert len(log_files) > 0
+            
+            jsonl_content = log_files[0].read_text()
+            if jsonl_content.strip():
+                lines = [json.loads(line) for line in jsonl_content.strip().split('\n')]
+                complete_events = [l for l in lines if l.get('event') == 'utterance_complete']
+                
+                # No utterance_complete events with empty ground_truth should be written
+                for evt in complete_events:
+                    gt = evt.get('ground_truth', '')
+                    assert gt.strip(), f"Found empty ground_truth in JSONL: {evt}"
+
+    @pytest.mark.asyncio
+    async def test_runner_scores_only_valid_ground_truth(self, tmp_path):
+        """Test that runner only scores utterances with valid ground truth"""
+        mock_settings = Mock()
+        mock_settings.BABELBIT_NETUID = 42
+        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.S3_LOG_DIR = "logs"
+        
+        logs_dir = tmp_path / "logs"
+        scores_dir = tmp_path / "scores"
+        
+        sample_miner = Miner(
+            uid=1, hotkey="test_hotkey", model="test/model",
+            revision="main", slug="test-miner", chute_id="chute1", block=100
+        )
+        
+        # Mix of valid and empty ground truth
+        mixed_dialogues = {
+            "test_hotkey": {
+                "dlg-mixed": [
+                    BBPredictedUtterance(
+                        index="utt-1", step=0, prefix="Hello",
+                        prediction="world", done=True,
+                        ground_truth="Hello world EOF"
+                    ),
+                    BBPredictedUtterance(
+                        index="utt-2", step=0, prefix="Test",
+                        prediction="", done=True,
+                        ground_truth=""  # Empty - should be skipped
+                    ),
+                ]
+            }
+        }
+        
+        with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
+             patch('babelbit.cli.runner.init_utterance_auth'), \
+             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock), \
+             patch('babelbit.cli.runner.get_current_challenge_uid', new_callable=AsyncMock, return_value="challenge-mixed"), \
+             patch('babelbit.cli.runner.get_miners_from_registry', new_callable=AsyncMock, return_value={1: sample_miner}), \
+             patch('babelbit.cli.runner.predict_with_utterance_engine_multi_miner', new_callable=AsyncMock, return_value=mixed_dialogues), \
+             patch('babelbit.cli.runner.close_http_clients'):
+            
+            with patch.dict('os.environ', {
+                'BB_OUTPUT_LOGS_DIR': str(logs_dir),
+                'BB_OUTPUT_SCORES_DIR': str(scores_dir)
+            }):
+                await runner()
+            
+            score_files = list(scores_dir.glob("*-score.json"))
+            
+            if len(score_files) > 0:
+                score_data = json.loads(score_files[0].read_text())
+                utterances_scored = score_data.get("utterances", [])
+                
+                # Only the valid utterance should be scored
+                assert len(utterances_scored) == 1, f"Should score 1 valid utterance, got {len(utterances_scored)}"
+                
+                # Verify no empty ground_truth
+                for utt in utterances_scored:
+                    gt = utt.get('ground_truth', '').strip()
+                    assert gt, f"Utterance {utt.get('utterance_number')} has empty ground_truth"
+                
+                # Verify it's the valid one
+                assert "Hello world" in utterances_scored[0].get('ground_truth')
 
 
 if __name__ == "__main__":

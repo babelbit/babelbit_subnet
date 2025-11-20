@@ -2,6 +2,14 @@
 """
 Test script to verify the miner API is working correctly.
 Tests both health check and prediction endpoints.
+
+IMPORTANT: This test sends requests without Bittensor protocol headers.
+To run this test, the miner must be started with MINER_DEV_MODE=1:
+
+    MINER_DEV_MODE=1 uv run python babelbit/miner/serve_miner.py
+
+In production mode (MINER_DEV_MODE=0), only requests with valid Bittensor
+headers from validators will be accepted.
 """
 import asyncio
 import httpx

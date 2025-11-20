@@ -51,6 +51,17 @@ async def _reset_local_subtensor():
             logger.info("[signer] 🔄 Subtensor connection reset")
 
 
+# Public API for tests and external use
+async def get_subtensor():
+    """Public API: Get or create the subtensor connection."""
+    return await _get_local_subtensor()
+
+
+async def reset_subtensor():
+    """Public API: Reset the subtensor connection."""
+    await _reset_local_subtensor()
+
+
 async def _should_reset_subtensor(operation_count: dict) -> bool:
     """
     Determine if subtensor should be reset based on operation count or age.
@@ -92,7 +103,7 @@ async def _set_weights_with_confirmation(
     for attempt in range(retries):
         st = None
         try:
-            st = await _get_local_subtensor()
+            st = await get_subtensor()
             ref_block = await st.get_current_block()
 
             # extrinsic
@@ -260,7 +271,7 @@ async def run_signer() -> None:
                     "[signer] Resetting subtensor connection after %d set_weights operations (memory leak mitigation)",
                     operation_count["set_weights"]
                 )
-                await _reset_local_subtensor()
+                await reset_subtensor()
                 operation_count["set_weights"] = 0
                 # Force garbage collection to clean up accumulated objects
                 import gc
@@ -308,6 +319,6 @@ async def run_signer() -> None:
     finally:
         # Cleanup on shutdown
         logger.info("Shutting down signer...")
-        await _reset_local_subtensor()  # Close subtensor connection
+        await reset_subtensor()  # Close subtensor connection
         await runner.cleanup()
         logger.info("Signer shutdown complete")

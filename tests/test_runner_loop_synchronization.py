@@ -52,9 +52,12 @@ class TestRunnerLoopBlockSynchronization:
         mock_subtensor.wait_for_block = mock_wait_for_block
         
         with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
+             patch('babelbit.cli.runner.init_utterance_auth'), \
+             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock), \
              patch('babelbit.cli.runner.get_subtensor', new_callable=AsyncMock, return_value=mock_subtensor), \
              patch('babelbit.cli.runner.reset_subtensor', new_callable=AsyncMock), \
-             patch('babelbit.cli.runner.runner', new_callable=AsyncMock, side_effect=mock_runner):
+             patch('babelbit.cli.runner.runner', new_callable=AsyncMock, side_effect=mock_runner), \
+             patch.dict('os.environ', {'BABELBIT_RUNNER_TEMPO': '300'}):
             
             try:
                 await asyncio.wait_for(runner_loop(), timeout=1.0)
@@ -95,6 +98,8 @@ class TestRunnerLoopBlockSynchronization:
             await asyncio.sleep(0.01)
         
         with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
+             patch('babelbit.cli.runner.init_utterance_auth'), \
+             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock), \
              patch('babelbit.cli.runner.get_subtensor', new_callable=AsyncMock, side_effect=mock_get_subtensor), \
              patch('babelbit.cli.runner.reset_subtensor', new_callable=AsyncMock), \
              patch('babelbit.cli.runner.runner', new_callable=AsyncMock, side_effect=mock_runner), \
@@ -265,9 +270,12 @@ class TestRunnerLoopBlockSynchronization:
         mock_subtensor.wait_for_block = mock_wait_for_block
         
         with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
+             patch('babelbit.cli.runner.init_utterance_auth'), \
+             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock), \
              patch('babelbit.cli.runner.get_subtensor', new_callable=AsyncMock, return_value=mock_subtensor), \
              patch('babelbit.cli.runner.reset_subtensor', new_callable=AsyncMock), \
-             patch('babelbit.cli.runner.runner', new_callable=AsyncMock, side_effect=mock_runner):
+             patch('babelbit.cli.runner.runner', new_callable=AsyncMock, side_effect=mock_runner), \
+             patch.dict('os.environ', {'BABELBIT_RUNNER_TEMPO': '300'}):
             
             try:
                 await asyncio.wait_for(runner_loop(), timeout=1.0)
@@ -306,6 +314,8 @@ class TestRunnerLoopBlockSynchronization:
         mock_subtensor.get_current_block = mock_get_current_block
         
         with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
+             patch('babelbit.cli.runner.init_utterance_auth'), \
+             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock), \
              patch('babelbit.cli.runner.get_subtensor', new_callable=AsyncMock, return_value=mock_subtensor), \
              patch('babelbit.cli.runner.reset_subtensor', new_callable=AsyncMock), \
              patch('babelbit.cli.runner.runner', new_callable=AsyncMock, side_effect=mock_runner):
@@ -351,6 +361,8 @@ class TestRunnerLoopBlockSynchronization:
         mock_subtensor.get_current_block = mock_get_current_block
         
         with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
+             patch('babelbit.cli.runner.init_utterance_auth'), \
+             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock), \
              patch('babelbit.cli.runner.get_subtensor', new_callable=AsyncMock, return_value=mock_subtensor), \
              patch('babelbit.cli.runner.reset_subtensor', new_callable=AsyncMock, side_effect=mock_reset_subtensor), \
              patch('babelbit.cli.runner.runner', new_callable=AsyncMock, side_effect=mock_runner), \

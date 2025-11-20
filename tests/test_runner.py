@@ -98,11 +98,11 @@ def sample_dialogue_utterances():
             )
         ]
     }
-    # Return format for multi_miner: {miner_slug: dialogues_dict}
+    # Return format for multi_miner: {miner_hotkey: dialogues_dict}
     return {
-        "test-miner-1": single_dialogue,
-        "test-miner-2": single_dialogue,
-        "test-miner-3": single_dialogue,
+        "hotkey1": single_dialogue,
+        "hotkey2": single_dialogue,
+        "hotkey3": single_dialogue,
     }
 
 
@@ -295,9 +295,9 @@ class TestRunner:
     ):
         """Test handling when ground truth cannot be extracted from dialogue"""
         
-        # Create utterances without ground_truth - multi_miner format
+        # Create utterances without ground_truth - multi_miner format (using hotkey)
         utterances_no_gt = {
-            "test-miner-1": {
+            "hotkey1": {
                 "dialogue-456": [
                     BBPredictedUtterance(
                         index="utterance-1",

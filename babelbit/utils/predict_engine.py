@@ -3,9 +3,12 @@ from time import monotonic
 from json import loads
 from random import uniform
 from logging import getLogger
+import time
+import uuid
 
 from asyncio import TimeoutError, sleep, gather, wait_for
 from aiohttp import ClientError, ClientTimeout
+from substrateinterface import Keypair
 
 # from babelbit.chute_template.schemas import SVPredictInput
 from babelbit.utils.data_models import BBPredictedUtterance, BBPredictOutput
@@ -13,6 +16,8 @@ from babelbit.utils.settings import get_settings
 from babelbit.utils.async_clients import get_async_client
 # from babelbit.utils.challenges import prepare_challenge_payload
 from babelbit.utils.chutes_helpers import get_chute_slug_and_id
+from babelbit.utils.bittensor_helpers import load_hotkey_keypair
+from bittensor.utils import networking
 
 logger = getLogger(__name__)
 
@@ -83,21 +88,56 @@ async def call_miner_model_on_chutes(slug: str,
         timeout = float(settings.CHUTES_TIMEOUT_SEC)
     return await predict_utterance(payload=payload, slug=slug, context_used=context_used, timeout=timeout)
 
+# Cache for validator identity to avoid repeated file I/O
+_VALIDATOR_IDENTITY_CACHE = None
+
+def _get_validator_identity():
+    """Get or cache validator's keypair and identity information."""
+    global _VALIDATOR_IDENTITY_CACHE
+    if _VALIDATOR_IDENTITY_CACHE is None:
+        settings = get_settings()
+        try:
+            keypair = load_hotkey_keypair(
+                settings.BITTENSOR_WALLET_COLD, 
+                settings.BITTENSOR_WALLET_HOT
+            )
+            external_ip = networking.get_external_ip()
+            validator_uuid = str(uuid.uuid4())
+            _VALIDATOR_IDENTITY_CACHE = {
+                'keypair': keypair,
+                'hotkey': keypair.ss58_address,
+                'external_ip': external_ip,
+                'uuid': validator_uuid
+            }
+            logger.info(f"Validator identity initialized: hotkey={keypair.ss58_address[:8]}...")
+        except Exception as e:
+            logger.error(f"Failed to load validator keypair: {e}")
+            raise
+    return _VALIDATOR_IDENTITY_CACHE
+
+
 async def call_miner_axon_endpoint(
     axon_ip: str,
     axon_port: int,
     payload: BBPredictedUtterance,
     context_used: str,
+    miner_hotkey: str,
     timeout: Optional[float] = None
 ) -> BBPredictOutput:
     """
-    Call a miner's axon endpoint directly for utterance prediction.
+    Call a miner's axon endpoint directly for utterance prediction using Bittensor protocol.
+    
+    This function implements the Bittensor dendrite-axon communication protocol with:
+    - Cryptographic signatures for request authentication
+    - Nonce-based replay attack prevention
+    - Proper header construction following Bittensor standards
     
     Args:
         axon_ip: IP address of the miner's axon
         axon_port: Port of the miner's axon
         payload: The utterance prediction request
         context_used: Context string used for this prediction
+        miner_hotkey: The SS58 address of the target miner's hotkey
         timeout: Request timeout in seconds
         
     Returns:
@@ -108,6 +148,19 @@ async def call_miner_axon_endpoint(
 
     if timeout is None:
         timeout = float(settings.CHUTES_TIMEOUT_SEC)
+    
+    # Get validator identity (cached)
+    try:
+        validator_identity = _get_validator_identity()
+    except Exception as e:
+        return BBPredictOutput(
+            success=False,
+            model="axon",
+            utterance=payload,
+            error=f"validator_identity_error:{str(e)}",
+            context_used=context_used,
+            complete=False
+        )
 
     # If running in development/local mode, translate localhost or host IPs so
     # containers can reach services running on the Docker host via host.docker.internal
@@ -125,11 +178,43 @@ async def call_miner_axon_endpoint(
     url = f"http://{axon_ip}:{axon_port}/{settings.BB_MINER_PREDICT_ENDPOINT}"
     session = await get_async_client()
     
+    # Build Bittensor protocol headers
+    nonce = time.time_ns()
+    body_hash = ""  # Could compute hash of payload if needed for extra security
+    
+    # Construct the message to sign following Bittensor protocol:
+    # Format: {nonce}.{dendrite_hotkey}.{axon_hotkey}.{uuid}.{body_hash}
+    message = f"{nonce}.{validator_identity['hotkey']}.{miner_hotkey}.{validator_identity['uuid']}.{body_hash}"
+    
+    # Sign the message with validator's keypair
+    signature = f"0x{validator_identity['keypair'].sign(message).hex()}"
+    
+    # Construct headers following Bittensor synapse format
+    headers = {
+        "Content-Type": "application/json",
+        # Dendrite (validator) information
+        "bt_header_dendrite_nonce": str(nonce),
+        "bt_header_dendrite_hotkey": validator_identity['hotkey'],
+        "bt_header_dendrite_signature": signature,
+        "bt_header_dendrite_uuid": validator_identity['uuid'],
+        "bt_header_dendrite_ip": validator_identity['external_ip'],
+        "bt_header_dendrite_version": "7002000",  # Bittensor version
+        # Axon (miner) information
+        "bt_header_axon_hotkey": miner_hotkey,
+        "bt_header_axon_ip": axon_ip,
+        "bt_header_axon_port": str(axon_port),
+        # Request metadata
+        "timeout": str(timeout),
+        "name": "BBPredictedUtterance",
+        "computed_body_hash": body_hash,
+    }
+    
     t0 = monotonic()
     
     try:
         async with session.post(
             url,
+            headers=headers,
             json=payload.model_dump(mode="json"),
             timeout=ClientTimeout(total=timeout)
         ) as response:
@@ -137,6 +222,13 @@ async def call_miner_axon_endpoint(
             text = await response.text()
             
             if response.status != 200:
+                try:
+                    logger.debug(
+                        "Axon non-200: status=%s body='%s' url=%s miner_hk=%s",
+                        response.status, text[:200], url, miner_hotkey[:16] + "...",
+                    )
+                except Exception:
+                    pass
                 return BBPredictOutput(
                     success=False,
                     model="axon",
@@ -175,6 +267,10 @@ async def call_miner_axon_endpoint(
                 )
                 
     except TimeoutError:
+        try:
+            logger.debug("Axon timeout: url=%s miner_hk=%s timeout=%.2fs", url, miner_hotkey[:16] + "...", timeout)
+        except Exception:
+            pass
         return BBPredictOutput(
             success=False,
             model="axon",
@@ -184,6 +280,13 @@ async def call_miner_axon_endpoint(
             complete=False
         )
     except Exception as e:
+        try:
+            logger.debug(
+                "Axon error: url=%s miner_hk=%s err_type=%s err='%s'",
+                url, miner_hotkey[:16] + "...", type(e).__name__, str(e)[:300],
+            )
+        except Exception:
+            pass
         return BBPredictOutput(
             success=False,
             model="axon",
@@ -312,12 +415,33 @@ async def _predict_utterance_impl(
         except TimeoutError as e:
             last_err = f"timeout:{e}"
             logger.warning(f"Chute prediction timeout: URL={url} slug={slug} error={e}")
+            try:
+                logger.debug(
+                    "Chute timeout: slug=%s url=%s attempt=%d/%d elapsed=%.2fs timeout=%.2fs",
+                    slug, url, attempt, settings.CHUTES_API_N_RETRIES + 1, monotonic() - t0, timeout,
+                )
+            except Exception:
+                pass
         except ClientError as e:
             last_err = f"client_error:{type(e).__name__}:{e}"
             logger.warning(f"Chute prediction failed: URL={url} slug={slug} error={type(e).__name__}:{e}")
+            try:
+                logger.debug(
+                    "Chute client_error: slug=%s url=%s attempt=%d/%d err_type=%s err='%s'",
+                    slug, url, attempt, settings.CHUTES_API_N_RETRIES + 1, type(e).__name__, str(e)[:300],
+                )
+            except Exception:
+                pass
         except Exception as e:
             last_err = f"error:{type(e).__name__}:{e}"
             logger.warning(f"Chute prediction error: URL={url} slug={slug} error={type(e).__name__}:{e}")
+            try:
+                logger.debug(
+                    "Chute error: slug=%s url=%s attempt=%d/%d err_type=%s err='%s'",
+                    slug, url, attempt, settings.CHUTES_API_N_RETRIES + 1, type(e).__name__, str(e)[:300],
+                )
+            except Exception:
+                pass
 
         # Exponential backoff with jitter if not last attempt
         if attempt <= settings.CHUTES_API_N_RETRIES:
@@ -326,6 +450,13 @@ async def _predict_utterance_impl(
             await sleep(max(0.05, sleep_s))
 
     # Failed after all retries
+    try:
+        logger.debug(
+            "Chute failed after retries: slug=%s url=%s elapsed=%.2fs last_err='%s'",
+            slug, url, monotonic() - t0, (last_err or "unknown_error")[:300],
+        )
+    except Exception:
+        pass
     return BBPredictOutput(
         success=False,
         model="unknown",
