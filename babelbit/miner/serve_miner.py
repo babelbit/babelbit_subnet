@@ -21,12 +21,29 @@ from substrateinterface import Keypair
 
 from babelbit.miner.model_loader import load_model_and_tokenizer
 from babelbit.miner.utils import verify_bittensor_request
+from babelbit.utils.bittensor_helpers import load_hotkey_keypair
 from babelbit.utils.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
 # Simple in-process cache for tokenized static prompt prefixes
 _PROMPT_CACHE: dict[str, torch.Tensor] = {}
+_MINER_HOTKEY_SS58: Optional[str] = None
+
+
+def _get_miner_hotkey_ss58() -> Optional[str]:
+    """Load and cache this miner's hotkey SS58 address."""
+    global _MINER_HOTKEY_SS58
+    if _MINER_HOTKEY_SS58:
+        return _MINER_HOTKEY_SS58
+    try:
+        settings = get_settings()
+        keypair = load_hotkey_keypair(settings.BITTENSOR_WALLET_COLD, settings.BITTENSOR_WALLET_HOT)
+        _MINER_HOTKEY_SS58 = keypair.ss58_address
+        return _MINER_HOTKEY_SS58
+    except Exception as e:
+        logger.warning(f"Unable to load miner hotkey for request verification: {e}")
+        return None
 
 
 class BBUtteranceEvaluation(BaseModel):
@@ -473,6 +490,7 @@ async def predict_endpoint(
     axon_hotkey = headers.get("bt_header_axon_hotkey")
     body_hash = headers.get("computed_body_hash", "")
     timeout_str = headers.get("timeout", "12.0")
+    miner_hotkey = _get_miner_hotkey_ss58()
     
     # Check if this is a Bittensor protocol request
     is_bittensor_request = all([
@@ -484,6 +502,18 @@ async def predict_endpoint(
     ])
     
     if is_bittensor_request:
+        # Ensure the request is intended for this miner's hotkey
+        if miner_hotkey and axon_hotkey and axon_hotkey != miner_hotkey:
+            logger.warning(
+                "Rejecting request: target hotkey mismatch (expected %s, got %s)",
+                miner_hotkey,
+                axon_hotkey,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Request not addressed to this miner hotkey",
+            )
+
         # Verify the request using Bittensor protocol
         try:
             timeout = float(timeout_str)

@@ -64,7 +64,7 @@ async def _validate_main(tail: int, alpha: float, m_min: int, tempo: int):
     consecutive_skipped_epochs = 0
     last_epoch_block = -1  # Track last epoch boundary for counting
     last_challenge_uid = None  # Track current challenge to reset counter on change
-    BB_MAX_SKIPPED_WEIGHT_EPOCHS = int(os.getenv("BB_MAX_SKIPPED_WEIGHT_EPOCHS", "6"))
+    BB_MAX_SKIPPED_WEIGHT_EPOCHS = int(os.getenv("BB_MAX_SKIPPED_WEIGHT_EPOCHS", "12"))
     EPOCH_LENGTH = 360  # blocks per epoch
     
     while True:
@@ -214,7 +214,7 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25, co
     hk_to_uid = {hk: i for i, hk in enumerate(meta.hotkeys)}
 
     # Get max skipped epochs before falling back to default weight
-    MAX_SKIPPED_EPOCHS = int(os.getenv("BB_MAX_SKIPPED_WEIGHT_EPOCHS", "6"))
+    MAX_SKIPPED_EPOCHS = int(os.getenv("BB_MAX_SKIPPED_WEIGHT_EPOCHS", "12"))
 
     # Get the current active challenge ID
     current_challenge_uid = None
@@ -340,19 +340,30 @@ async def get_weights(tail: int = 28800, alpha: float = 0.2, m_min: int = 25, co
             
             # Check if the fallback challenge is older than 12 hours
             if latest_timestamp:
-                age_hours = (datetime.now(timezone.utc) - latest_timestamp).total_seconds() / 3600
-                if age_hours > 12:
+                latest_timestamp = (
+                    latest_timestamp.replace(tzinfo=timezone.utc)
+                    if latest_timestamp.tzinfo is None
+                    else latest_timestamp.astimezone(timezone.utc)
+                )
+                age_hours = (datetime.now(timezone.utc) - latest_timestamp) / timedelta(hours=1)
+                is_stale = age_hours > 12
+                if is_stale:
                     logger.warning(
                         f"Latest challenge {latest_challenge} is {age_hours:.1f} hours old (>12h). "
                         f"Data too stale for weight assignment."
                     )
                     logger.debug("get_weights: fallback challenge age=%.2f hours exceeds threshold", age_hours)
+                if is_stale or consecutive_skipped_epochs >= MAX_SKIPPED_EPOCHS:
+                    reasons = []
+                    if is_stale:
+                        reasons.append("stale fallback challenge data (>12h old)")
                     if consecutive_skipped_epochs >= MAX_SKIPPED_EPOCHS:
-                        logger.warning("Falling back to default weight (uid 248) after max skipped epochs.")
-                        return [248], [1.0], None
-                    else:
-                        logger.info(f"Skipping weights this round ({consecutive_skipped_epochs}/{MAX_SKIPPED_EPOCHS}).")
-                        return [], [], None
+                        reasons.append(f"max skipped epochs reached ({consecutive_skipped_epochs}/{MAX_SKIPPED_EPOCHS})")
+                    logger.warning(
+                        "Falling back to default weight (uid 248) due to %s.",
+                        " and ".join(reasons) if reasons else "fallback conditions",
+                    )
+                    return [248], [1.0], None
             
             current_rows = [(hk, score, cu) for hk, score, cu, ts in enriched if cu == latest_challenge]
             logger.info(f"Using fallback challenge {latest_challenge} with {len(current_rows)} scores")
@@ -475,4 +486,10 @@ async def retry_set_weights(wallet, uids, weights):
         logger.warning("Signer timed out — falling back to local set_weights")
 
     # ---- Fallback local ----
-    return await _set_weights_with_confirmation(wallet, NETUID, uids, weights)
+    retries = int(os.getenv("BB_SET_WEIGHTS_RETRIES", os.getenv("SIGNER_RETRIES", "20")))
+    delay_s = float(
+        os.getenv("BB_SET_WEIGHTS_RETRY_DELAY", os.getenv("SIGNER_RETRY_DELAY", "2"))
+    )
+    return await _set_weights_with_confirmation(
+        wallet, NETUID, uids, weights, retries=retries, delay_s=delay_s
+    )

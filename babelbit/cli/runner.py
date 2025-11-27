@@ -34,14 +34,19 @@ from babelbit.utils.db_pool import (
     insert_scoring_submissions_bulk,
 )
 from babelbit.utils.challenge_status import mark_challenge_processed
+
 # Scoring policy: Runner performs per-dialogue scoring using score_dialogue.score_jsonl
 # immediately after writing the raw dialogue JSONL, then persists both dialogue score JSONs
 # and a challenge summary JSON per miner. This keeps downstream evaluation simple while
 # still enabling external rescoring if needed (raw logs retained in logs_dir).
+# Backward-compat: fall back to test_scripts if the scoring package isn't present.
 try:
-    from babelbit.test_scripts.score_dialogue import score_jsonl  # type: ignore
+    from babelbit.scoring.score_dialogue import score_jsonl  # type: ignore
 except Exception:
-    score_jsonl = None  # Will log warning when attempting to score
+    try:
+        from babelbit.test_scripts.score_dialogue import score_jsonl  # type: ignore
+    except Exception:
+        score_jsonl = None  # Will log warning when attempting to score
 
 logger = getLogger(__name__)
 
@@ -660,4 +665,3 @@ async def runner_loop():
             logger.info("[RunnerLoop] DB pool closed")
         except Exception as e:
             logger.warning(f"[RunnerLoop] Error closing DB pool: {e}")
-

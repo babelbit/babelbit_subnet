@@ -162,26 +162,26 @@ async def _set_weights_with_confirmation(
     uids: list[int],
     weights: list[float],
     wait_for_inclusion: bool = False,
-    retries: int = 10,
+    retries: int = 20,
     delay_s: float = 2.0,
     log_prefix: str = "[bb-local]",
 ) -> bool:
-    import bittensor as bt
-
     for attempt in range(retries):
+        st = None
         try:
             st = await get_subtensor()
             ref = await st.get_current_block()
-            # (sync) submission via non-async client 
-            bt.subtensor(
-                os.getenv("BITTENSOR_SUBTENSOR_ENDPOINT", "finney")
-            ).set_weights(
+            success = await st.set_weights(
                 wallet=wallet,
                 netuid=netuid,
                 uids=uids,
                 weights=weights,
                 wait_for_inclusion=wait_for_inclusion,
             )
+            if not success:
+                logger.warning(f"{log_prefix} set_weights returned False, retry…")
+                await asyncio.sleep(delay_s)
+                continue
             await st.wait_for_block()
             meta = await st.metagraph(netuid)
             try:
@@ -203,6 +203,11 @@ async def _set_weights_with_confirmation(
             logger.warning(
                 f"{log_prefix} attempt {attempt+1}/{retries} error: {type(e).__name__}: {e}"
             )
+            # Reset the cached subtensor on websocket/timeout issues to avoid stale sessions
+            try:
+                await reset_subtensor()
+            except Exception:
+                logger.debug(f"{log_prefix} subtensor reset failed", exc_info=True)
         await asyncio.sleep(delay_s)
     return False
 

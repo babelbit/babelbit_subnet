@@ -13,7 +13,10 @@ from babelbit.utils.settings import get_settings
 from babelbit.utils.bittensor_helpers import load_hotkey_keypair, wait_until_block_modulo
 from babelbit.utils.signing import sign_message
 from babelbit.utils.async_clients import get_async_client
-from babelbit.utils.utterance_auth import get_auth_headers
+from babelbit.utils.utterance_auth import (
+    get_auth_headers,
+    authenticate_utterance_engine,
+)
 from babelbit.chute_template.schemas import BBPredictedUtterance
 
 logger = getLogger(__name__)
@@ -80,6 +83,35 @@ class ScoreVisionChallengeError(Exception):
     pass
 
 
+async def _request_with_reauth(session, method: str, url: str, *, json_payload: Optional[dict] = None, allow_retry: bool = True):
+    """
+    Send an authenticated request and, on 401, refresh auth once then retry.
+    Returns (status, parsed_json_or_text).
+    """
+    headers = await get_auth_headers()
+    request_kwargs = {"headers": headers}
+    if json_payload is not None:
+        request_kwargs["json"] = json_payload
+
+    # Prefer method-specific call (get/post) if available to match existing mocks
+    caller = getattr(session, method.lower(), None)
+    if caller is None:
+        caller = session.request
+
+    async with caller(method, url, **request_kwargs) if caller is session.request else caller(url, **request_kwargs) as response:
+        if response.status == 401 and allow_retry:
+            logger.warning("Utterance engine returned 401 — refreshing auth and retrying once.")
+            await authenticate_utterance_engine()
+            return await _request_with_reauth(session, method, url, json_payload=json_payload, allow_retry=False)
+
+        try:
+            data = await response.json()
+        except Exception:
+            data = await response.text()
+
+        return response.status, data
+
+
 async def get_current_challenge_uid(utterance_engine_url: str) -> Optional[str]:
     """
     Call the utterance engine /start endpoint to get the current challenge ID.
@@ -95,17 +127,14 @@ async def get_current_challenge_uid(utterance_engine_url: str) -> Optional[str]:
     """
     async def _get_challenge():
         session = await get_async_client()
-        headers = await get_auth_headers()
+        status, start_data = await _request_with_reauth(session, "GET", f"{utterance_engine_url}/start")
+        if status != 200:
+            raise UtteranceEngineError(f"Failed to get challenge ID: HTTP {status}")
         
-        async with session.get(f"{utterance_engine_url}/start", headers=headers) as response:
-            if response.status != 200:
-                raise UtteranceEngineError(f"Failed to get challenge ID: HTTP {response.status}")
-            
-            start_data = await response.json()
-            challenge_uid = start_data.get("challenge_uid")
-            
-            logger.info(f"Current challenge ID: {challenge_uid}")
-            return challenge_uid
+        challenge_uid = start_data.get("challenge_uid") if isinstance(start_data, dict) else None
+        
+        logger.info(f"Current challenge ID: {challenge_uid}")
+        return challenge_uid
     
     try:
         return await retry_with_exponential_backoff(_get_challenge, max_retries=3, initial_delay=1.0)
@@ -141,16 +170,15 @@ async def predict_with_utterance_engine(
     from babelbit.utils.predict_engine import call_miner_model_on_chutes
     
     session = await get_async_client()
-    headers = await get_auth_headers()
     dialogues = {}  # dialogue_uid -> List[BBPredictedUtterance]
     consecutive_prediction_errors = 0  # Track consecutive prediction failures
     
     async def _call_start():
         """Helper to call /start endpoint with retry logic"""
-        async with session.get(f"{utterance_engine_url}/start", headers=headers) as response:
-            if response.status != 200:
-                raise UtteranceEngineError(f"Failed to start session: HTTP {response.status}")
-            return await response.json()
+        status, data = await _request_with_reauth(session, "GET", f"{utterance_engine_url}/start")
+        if status != 200:
+            raise UtteranceEngineError(f"Failed to start session: HTTP {status}")
+        return data if isinstance(data, dict) else {}
     
     async def _call_next(session_id: str, prediction: str):
         """Helper to call /next endpoint with retry logic"""
@@ -159,19 +187,15 @@ async def predict_with_utterance_engine(
             "prediction": prediction
         }
         
-        async with session.post(
-            f"{utterance_engine_url}/next", 
-            json=next_payload,
-            headers=headers
-        ) as next_response:
-            if next_response.status != 200:
-                error_data = await next_response.json()
-                if error_data.get("error") == "invalid or missing session_id":
-                    raise UtteranceEngineError(f"Invalid session: {session_id}")
-                else:
-                    raise UtteranceEngineError(f"Failed to get next token: HTTP {next_response.status}")
-            
-            return await next_response.json()
+        status, data = await _request_with_reauth(session, "POST", f"{utterance_engine_url}/next", json_payload=next_payload)
+        if status != 200:
+            error_data = data if isinstance(data, dict) else {}
+            if error_data.get("error") == "invalid or missing session_id":
+                raise UtteranceEngineError(f"Invalid session: {session_id}")
+            else:
+                raise UtteranceEngineError(f"Failed to get next token: HTTP {status}")
+        
+        return data if isinstance(data, dict) else {}
     
     try:
         session_complete = False
@@ -479,7 +503,6 @@ async def predict_with_utterance_engine_multi_miner(
         UtteranceEngineError: If the API interaction fails
     """
     session = await get_async_client()
-    headers = await get_auth_headers()
     
     # Helper to get unique identifier for a miner (use hotkey since it exists for all miners)
     def get_miner_key(miner):
@@ -493,10 +516,10 @@ async def predict_with_utterance_engine_multi_miner(
     
     async def _call_start():
         """Helper to call /start endpoint with retry logic"""
-        async with session.get(f"{utterance_engine_url}/start", headers=headers) as response:
-            if response.status != 200:
-                raise UtteranceEngineError(f"Failed to start session: HTTP {response.status}")
-            return await response.json()
+        status, data = await _request_with_reauth(session, "GET", f"{utterance_engine_url}/start")
+        if status != 200:
+            raise UtteranceEngineError(f"Failed to start session: HTTP {status}")
+        return data if isinstance(data, dict) else {}
     
     async def _call_next(session_id: str, prediction: str = ""):
         """Helper to call /next endpoint with retry logic"""
@@ -505,19 +528,15 @@ async def predict_with_utterance_engine_multi_miner(
             "prediction": prediction  # Empty string - utterance engine doesn't use it
         }
         
-        async with session.post(
-            f"{utterance_engine_url}/next", 
-            json=next_payload,
-            headers=headers
-        ) as next_response:
-            if next_response.status != 200:
-                error_data = await next_response.json()
-                if error_data.get("error") == "invalid or missing session_id":
-                    raise UtteranceEngineError(f"Invalid session: {session_id}")
-                else:
-                    raise UtteranceEngineError(f"Failed to get next token: HTTP {next_response.status}")
-            
-            return await next_response.json()
+        status, data = await _request_with_reauth(session, "POST", f"{utterance_engine_url}/next", json_payload=next_payload)
+        if status != 200:
+            error_data = data if isinstance(data, dict) else {}
+            if error_data.get("error") == "invalid or missing session_id":
+                raise UtteranceEngineError(f"Invalid session: {session_id}")
+            else:
+                raise UtteranceEngineError(f"Failed to get next token: HTTP {status}")
+        
+        return data if isinstance(data, dict) else {}
     
     try:
         session_complete = False
@@ -845,4 +864,3 @@ async def simple_utterance_engine_test(base_url: str) -> Dict[str, List[BBPredic
         Dict mapping dialogue_uid to List of BBPredictedUtterance objects
     """
     return await predict_with_utterance_engine(base_url, None)
-

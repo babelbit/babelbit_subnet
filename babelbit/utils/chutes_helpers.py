@@ -61,12 +61,45 @@ def generate_nickname(key: str) -> str:
     petname.random = Random(int(key, 16))
     return petname.Generate(words=2, separator="-")
 
+def _sanitize_image_name(name: str) -> str:
+    """Sanitize a chute image/name to comply with docker-like constraints.
+    Ensures:
+    - lowercase
+    - only [a-z0-9._-]
+    - no leading/trailing separators
+    - does not start with a separator; if so, prefix with 'bb'
+    - non-empty (fallback to 'default')
+    """
+    allowed = set("abcdefghijklmnopqrstuvwxyz0123456789._-")
+    name = (name or "").lower()
+    name = "".join(ch if ch in allowed else '-' for ch in name)
+    # collapse consecutive separators
+    while "--" in name:
+        name = name.replace("--", "-")
+    while ".." in name:
+        name = name.replace("..", ".")
+    # strip separators
+    name = name.strip(".-_")
+    if not name:
+        name = "default"
+    # must not start with a separator (already stripped), ensure starts alnum
+    if not name[0].isalnum():
+        name = f"bb-{name}"
+    return name
+
 
 def get_chute_name(hf_revision: str) -> str:
     settings = get_settings()
     nickname = generate_nickname(key=hf_revision)
     logger.info(f"Hf Revision ({hf_revision}) -> Nickname ({nickname})")
-    return f"{settings.HUGGINGFACE_USERNAME.replace('/','-')}-babelbit-{nickname}".lower()
+    raw_username = settings.HUGGINGFACE_USERNAME or ""
+    # normalize slashes/underscores and trim separators
+    raw_username = raw_username.replace('/', '-').replace(' ', '-')
+    raw_username = raw_username.strip('-._')
+    username = raw_username if raw_username else "default"
+    combined = f"{username}-babelbit-{nickname}"
+    safe = _sanitize_image_name(combined)
+    return safe
 
 
 def guess_chute_slug(hf_revision: str) -> str:

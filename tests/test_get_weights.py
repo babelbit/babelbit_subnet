@@ -1,5 +1,6 @@
 import asyncio
 import types
+from datetime import datetime, timedelta, timezone
 import pytest
 from unittest.mock import AsyncMock, patch
 
@@ -54,6 +55,10 @@ async def test_get_weights_single_winner(monkeypatch):
 @pytest.mark.asyncio
 async def test_get_weights_no_data_defaults_uid0(monkeypatch):
     """Test that with no data, get_weights returns default uid 248"""
+    # Avoid hitting utterance engine during tests
+    monkeypatch.setenv("BB_UTTERANCE_ENGINE_URL", "")
+    # Ensure skip count is well above any configured max to force fallback
+    max_skip_trigger = 1_000
     class FakeMeta:
         hotkeys = ["a", "b", "c"]
     async def fake_get_subtensor():
@@ -72,9 +77,12 @@ async def test_get_weights_no_data_defaults_uid0(monkeypatch):
     monkeypatch.setattr(validate_mod, "get_subtensor", fake_get_subtensor)
     monkeypatch.setattr(validate_mod.db_pool, "init", AsyncMock())
     monkeypatch.setattr(validate_mod, "_iter_scores_from_db", AsyncMock(return_value=[]))
+    # Avoid network call to utterance engine
+    from babelbit.utils import predict_utterances as pred_mod
+    monkeypatch.setattr(pred_mod, "get_current_challenge_uid", AsyncMock(return_value=None))
     
     # Pass consecutive_skipped_epochs >= MAX to trigger fallback
-    uids, weights, challenge_uid = await validate_mod.get_weights(consecutive_skipped_epochs=6)
+    uids, weights, challenge_uid = await validate_mod.get_weights(consecutive_skipped_epochs=max_skip_trigger)
     # Code defaults to uid 248 when no data available after max skips
     assert uids == [248]
     assert weights == [1.0]
@@ -164,6 +172,9 @@ async def test_get_weights_returns_challenge_uid(monkeypatch):
 @pytest.mark.asyncio
 async def test_get_weights_skips_unprocessed_challenge(monkeypatch):
     """Test that get_weights uses last challenge when current is unprocessed"""
+    # Use dummy URL so mocked get_current_challenge_uid is invoked
+    monkeypatch.setenv("BB_UTTERANCE_ENGINE_URL", "http://test")
+    max_skip_trigger = 1_000
     class FakeMeta:
         hotkeys = ["h1", "h2"]
     
@@ -192,6 +203,9 @@ async def test_get_weights_skips_unprocessed_challenge(monkeypatch):
     # Mock get_current_challenge_uid
     from babelbit.utils import predict_utterances as pred_mod
     monkeypatch.setattr(pred_mod, "get_current_challenge_uid", AsyncMock(return_value="challenge-unprocessed"))
+    # Avoid DB call when we stick with current challenge and max skips
+    from babelbit.utils import db_pool as db_pool_mod
+    monkeypatch.setattr(db_pool_mod, "_iter_scores_for_challenge", AsyncMock(return_value=[]))
     
     # Mock DB to return scores from last challenge
     monkeypatch.setattr(
@@ -220,7 +234,7 @@ async def test_get_weights_skips_unprocessed_challenge(monkeypatch):
     assert challenge_uid is None
     
     # Call with consecutive_skipped_epochs >= MAX (should fallback to uid 248)
-    uids, weights, challenge_uid = await validate_mod.get_weights(consecutive_skipped_epochs=6)
+    uids, weights, challenge_uid = await validate_mod.get_weights(consecutive_skipped_epochs=max_skip_trigger)
     
     # Should fall back to uid 248
     assert uids == [248]
@@ -228,3 +242,94 @@ async def test_get_weights_skips_unprocessed_challenge(monkeypatch):
     # When falling back to uid 248 from current unprocessed challenge, we still return the challenge UID
     # This allows the main loop to track which challenge triggered the fallback
     assert challenge_uid == "challenge-unprocessed"
+
+
+@pytest.mark.asyncio
+async def test_get_weights_fallback_stale_challenge_defaults(monkeypatch):
+    """If fallback challenge data is older than 12h, default to uid 248 immediately."""
+    class FakeMeta:
+        hotkeys = ["h1", "h2"]
+
+    async def fake_get_subtensor():
+        class ST:
+            async def metagraph(self, netuid):
+                return FakeMeta()
+        return ST()
+
+    class FakeSettings:
+        BABELBIT_NETUID = 1
+        BITTENSOR_WALLET_COLD = "cold"
+        BITTENSOR_WALLET_HOT = "hot"
+        SIGNER_URL = "http://signer"
+
+    from babelbit.utils import settings as settings_mod
+    monkeypatch.setattr(settings_mod, "get_settings", lambda: FakeSettings())
+
+    from babelbit.cli import validate as validate_mod
+    monkeypatch.setattr(validate_mod, "get_subtensor", fake_get_subtensor)
+    monkeypatch.setattr(validate_mod.db_pool, "init", AsyncMock())
+
+    # Avoid hitting the network for current challenge lookup
+    from babelbit.utils import predict_utterances as pred_mod
+    monkeypatch.setattr(pred_mod, "get_current_challenge_uid", AsyncMock(return_value=None))
+
+    stale_ts = datetime.now(timezone.utc) - timedelta(hours=13)
+    monkeypatch.setattr(
+        validate_mod,
+        "_iter_scores_from_db",
+        AsyncMock(return_value=[
+            ("h1", 0.7, "challenge-old", stale_ts),
+            ("h2", 0.8, "challenge-old", stale_ts),
+        ]),
+    )
+
+    uids, weights, challenge_uid = await validate_mod.get_weights(consecutive_skipped_epochs=2)
+
+    assert uids == [248]
+    assert weights == [1.0]
+    assert challenge_uid is None
+
+
+@pytest.mark.asyncio
+async def test_get_weights_fallback_stale_challenge_defaults_after_max(monkeypatch):
+    """If fallback challenge data is older than 12h and max skips exceeded, default to uid 248."""
+    class FakeMeta:
+        hotkeys = ["h1", "h2"]
+
+    async def fake_get_subtensor():
+        class ST:
+            async def metagraph(self, netuid):
+                return FakeMeta()
+        return ST()
+
+    class FakeSettings:
+        BABELBIT_NETUID = 1
+        BITTENSOR_WALLET_COLD = "cold"
+        BITTENSOR_WALLET_HOT = "hot"
+        SIGNER_URL = "http://signer"
+
+    from babelbit.utils import settings as settings_mod
+    monkeypatch.setattr(settings_mod, "get_settings", lambda: FakeSettings())
+
+    from babelbit.cli import validate as validate_mod
+    monkeypatch.setattr(validate_mod, "get_subtensor", fake_get_subtensor)
+    monkeypatch.setattr(validate_mod.db_pool, "init", AsyncMock())
+
+    from babelbit.utils import predict_utterances as pred_mod
+    monkeypatch.setattr(pred_mod, "get_current_challenge_uid", AsyncMock(return_value=None))
+
+    stale_ts = datetime.now(timezone.utc) - timedelta(hours=13)
+    monkeypatch.setattr(
+        validate_mod,
+        "_iter_scores_from_db",
+        AsyncMock(return_value=[
+            ("h1", 0.7, "challenge-old", stale_ts),
+            ("h2", 0.8, "challenge-old", stale_ts),
+        ]),
+    )
+
+    uids, weights, challenge_uid = await validate_mod.get_weights(consecutive_skipped_epochs=6)
+
+    assert uids == [248]
+    assert weights == [1.0]
+    assert challenge_uid is None

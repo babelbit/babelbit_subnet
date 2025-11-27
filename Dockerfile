@@ -50,8 +50,8 @@ COPY . /app
 # Install package in editable mode (dependencies already installed)
 RUN pip install --no-cache-dir --no-deps -e .
 
-# Run tests
-RUN python -m pytest tests/ -v --tb=short
+# Run tests and write a success marker if they pass
+RUN python -m pytest tests/ -v --tb=short && touch /tests-passed
 
 
 # Stage 5: Production - copy pre-installed dependencies from prod-dependencies stage
@@ -79,4 +79,5 @@ FROM test AS production-tested
 FROM production AS production-with-tests
 
 # This stage ensures tests must pass before the production image is created
-# No additional operations needed - the test gate is enforced by the dependency chain
+# Force-build the test stage by copying its success marker; build fails if tests fail
+COPY --from=test /tests-passed /tests-passed

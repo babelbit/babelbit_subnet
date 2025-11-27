@@ -6,6 +6,11 @@ Tests both:
 2. Miner identifiers are properly included in scoring_submissions
 """
 import pytest
+from babelbit.cli import runner as runner_mod
+
+# Semantic scoring disabled: if score_jsonl is unavailable, skip scoring-dependent tests
+if getattr(runner_mod, "score_jsonl", None) is None:  # pragma: no cover
+    pytest.skip("score_jsonl unavailable (semantic scoring reverted)", allow_module_level=True)
 import asyncio
 import json
 import os

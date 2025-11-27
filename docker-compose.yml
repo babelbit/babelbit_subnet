@@ -15,6 +15,11 @@ services:
       - BABELBIT_CACHE_DIR=/app/data/blocks
       - SIGNER_URL=http://signer:8080
       - BB_CHALLENGE_STATUS_DIR=/app/data/challenge_status
+      - PG_HOST=${PG_HOST}
+      - PG_PORT=${PG_PORT}
+      - PG_DB=${PG_DB}
+      - PG_USER=${PG_USER}
+      - PG_PASSWORD=${PG_PASSWORD}
     volumes:
       - validator-cache:/app/data/blocks
       - challenge-status:/app/data/challenge_status  # Shared challenge status tracking
@@ -32,6 +37,7 @@ services:
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets:ro  # Mount Bittensor wallets
       - challenge-status:/app/data/challenge_status  # Shared challenge status tracking
+      - hf-cache:/opt/hf:ro
     ports:
       - "8002:8000"
     environment:
@@ -39,6 +45,16 @@ services:
       BABELBIT_METRICS_ADDR: 0.0.0.0
       SIGNER_URL: http://signer:8080
       BB_CHALLENGE_STATUS_DIR: /app/data/challenge_status
+      PG_HOST: ${PG_HOST}
+      PG_PORT: ${PG_PORT}
+      PG_DB: ${PG_DB}
+      PG_USER: ${PG_USER}
+      PG_PASSWORD: ${PG_PASSWORD}
+      HF_HOME: /opt/hf
+      TRANSFORMERS_CACHE: /opt/hf/transformers
+      SENTENCE_TRANSFORMERS_HOME: /opt/hf/sentence_transformers
+      HF_HUB_ENABLE_HF_TRANSFER: 1
+      EMBEDDER_NAME: ${EMBEDDER_NAME:-mixedbread-ai/mxbai-embed-large-v1}
     command: ["bb", "-v", "runner"]
 
   signer:
@@ -63,3 +79,4 @@ volumes:
   # TODO: add scores and logs as volumes
   validator-cache:
   challenge-status:  # Shared volume for challenge status tracking between validator and runner
+  hf-cache:

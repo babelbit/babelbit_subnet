@@ -51,6 +51,26 @@ async def _reset_local_subtensor():
             logger.info("[signer] 🔄 Subtensor connection reset")
 
 
+async def _check_and_reset_stale_connection(log_prefix: str = "[signer]") -> None:
+    """Check if subtensor connection is stale and reset if needed BEFORE attempting operations."""
+    global _signer_subtensor_created_at
+
+    if _signer_subtensor_created_at is None:
+        return
+
+    max_age_seconds = int(os.getenv("SIGNER_SUBTENSOR_MAX_AGE_SECONDS", "1800"))
+    age = time.monotonic() - _signer_subtensor_created_at
+
+    if age >= max_age_seconds:
+        logger.warning(
+            "%s Subtensor connection is stale (%.1fs > %ds), resetting before operation",
+            log_prefix,
+            age,
+            max_age_seconds,
+        )
+        await _reset_local_subtensor()
+
+
 # Public API for tests and external use
 async def get_subtensor():
     """Public API: Get or create the subtensor connection."""
@@ -95,11 +115,14 @@ async def _set_weights_with_confirmation(
     uids: list[int],
     weights: list[float],
     wait_for_inclusion: bool,
-    retries: int = 10,
+    retries: int = 20,
     delay_s: float = 2.0,
     log_prefix: str = "[signer]",
 ) -> bool:
     """Set weights with confirmation, using local subtensor instance."""
+    # Pre-flight: reset stale subtensor if it has aged out
+    await _check_and_reset_stale_connection(log_prefix=log_prefix)
+
     for attempt in range(retries):
         st = None
         try:
@@ -256,7 +279,7 @@ async def run_signer() -> None:
                 uids,
                 wgts,
                 wfi,
-                retries=int(os.getenv("SIGNER_RETRIES", "10")),
+                retries=int(os.getenv("SIGNER_RETRIES", "20")),
                 delay_s=float(os.getenv("SIGNER_RETRY_DELAY", "2")),
                 log_prefix="[signer]",
             )
