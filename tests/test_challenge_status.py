@@ -88,34 +88,3 @@ def test_mark_challenge_without_optional_fields(tmp_path, monkeypatch):
     assert status["total_dialogues"] == 6
     assert status["mean_score"] is None
     assert status["metadata"] == {}
-
-
-@pytest.mark.asyncio
-async def test_is_challenge_processed_db_mock(monkeypatch):
-    """Test DB-based challenge status checking with mock."""
-    from babelbit.utils.challenge_status import is_challenge_processed_db
-    from unittest.mock import AsyncMock, patch
-    
-    challenge_uid = "test-challenge-db"
-    
-    # Mock the DB functions
-    async def mock_iter_scores(challenge_uid_param):
-        if challenge_uid_param == "test-challenge-db":
-            return [("hotkey1", 0.85), ("hotkey2", 0.90)]
-        return []
-    
-    # Mock db_pool.init
-    mock_db_pool = AsyncMock()
-    mock_db_pool.init = AsyncMock()
-    
-    with patch('babelbit.utils.db_pool.db_pool', mock_db_pool), \
-         patch('babelbit.utils.db_pool._iter_scores_for_challenge', new=mock_iter_scores):
-        
-        # Challenge with scores should return True
-        result = await is_challenge_processed_db(challenge_uid)
-        assert result is True
-        
-        # Challenge without scores should return False
-        result = await is_challenge_processed_db("nonexistent")
-        assert result is False
-

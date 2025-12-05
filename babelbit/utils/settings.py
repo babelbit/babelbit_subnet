@@ -38,6 +38,7 @@ class Settings(BaseModel):
     BB_ENABLE_DB_WRITES: bool
     BB_UTTERANCE_ENGINE_URL: str
     BB_RUNNER_ON_STARTUP: bool
+    BB_SUBMIT_API_URL: str
 
 
     # Template paths
@@ -130,7 +131,8 @@ def get_settings() -> Settings:
 
         # Babelbit core
         BABELBIT_NETUID=int(getenv("BABELBIT_NETUID", "59")),
-        BABELBIT_TEMPO=int(getenv("BABELBIT_TEMPO", "360")),
+        # enforcing tempo to 100 blocks to avoid vtrust issues
+        BABELBIT_TEMPO=100,
         BABELBIT_CACHE_DIR=Path(getenv("BABELBIT_CACHE_DIR", "~/.babelbit")).expanduser().resolve(),
         BABELBIT_VERSION=getenv("BABELBIT_VERSION", __version__),
         BABELBIT_API_TIMEOUT_S=int(getenv("BABELBIT_API_TIMEOUT_S", "10")),
@@ -139,6 +141,7 @@ def get_settings() -> Settings:
         BB_ENABLE_DB_WRITES=getenv("BB_ENABLE_DB_WRITES", "0").lower() in ("1", "true", "yes"),
         BB_UTTERANCE_ENGINE_URL=getenv("BB_UTTERANCE_ENGINE_URL", "http://localhost:8999"),
         BB_RUNNER_ON_STARTUP=getenv("BB_RUNNER_ON_STARTUP", "false").lower() in ("1", "true", "yes"),
+        BB_SUBMIT_API_URL=getenv("BB_SUBMIT_API_URL", "http://localhost:8000"),
         # Development / local testing flags
         BB_DEV_MODE=getenv("BB_DEV_MODE", "0").lower() in ("1", "true", "yes"),
         BB_LOCAL_MINER_IP=getenv("BB_LOCAL_MINER_IP", ""),

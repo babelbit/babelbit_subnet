@@ -1,335 +1,426 @@
 import asyncio
-import types
-from datetime import datetime, timedelta, timezone
+import json
+import sys
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
-from unittest.mock import AsyncMock, patch
 
-# We'll import get_weights after patching helpers to avoid hitting real chain
 
-@pytest.mark.asyncio
-async def test_get_weights_single_winner(monkeypatch):
-    # Mock metagraph with two hotkeys
-    class FakeMeta:
-        hotkeys = ["hk1", "hk2"]
-    
-    async def fake_get_subtensor():
-        class ST:
-            async def get_current_block(self):
-                return 100
-            async def metagraph(self, netuid):
-                return FakeMeta()
-        return ST()
+class FakeGauge:
+    def __init__(self):
+        self.calls = []
+        self._current_uid = None
 
-    # Mock settings
-    class FakeSettings:
-        BABELBIT_NETUID = 1
-        BITTENSOR_WALLET_COLD = "cold"
-        BITTENSOR_WALLET_HOT = "hot"
-        SIGNER_URL = "http://signer"
-    
-    from babelbit.utils import settings as settings_mod
-    monkeypatch.setattr(settings_mod, "get_settings", lambda: FakeSettings())
+    def labels(self, uid):
+        self._current_uid = uid
+        return self
 
-    # Patch get_subtensor used inside validate
+    def set(self, value):
+        self.calls.append((self._current_uid, value))
+
+
+class FakeSingleGauge:
+    def __init__(self):
+        self.value = None
+
+    def set(self, value):
+        self.value = value
+
+
+class MockResponse:
+    def __init__(self, *, status=200, json_data=None, text_data=""):
+        self.status = status
+        self._json_data = json_data or {}
+        self._text_data = text_data
+
+    async def json(self):
+        return self._json_data
+
+    async def text(self):
+        return self._text_data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class MockSession:
+    def __init__(self, *, get_response=None, post_response=None, get_exc=None, post_exc=None):
+        self.get_response = get_response
+        self.post_response = post_response
+        self.get_exc = get_exc
+        self.post_exc = post_exc
+        self.get_calls = []
+        self.post_calls = []
+
+    def get(self, url, params=None):
+        self.get_calls.append((url, params))
+        if self.get_exc:
+            raise self.get_exc
+        return self.get_response
+
+    async def post(self, url, json=None):
+        self.post_calls.append((url, json))
+        if self.post_exc:
+            raise self.post_exc
+        return self.post_response
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class FakeConnectorError(Exception):
+    pass
+
+
+class FakeTimeout:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
+def test_reset_no_score_if_challenge_changed():
     from babelbit.cli import validate as validate_mod
-    monkeypatch.setattr(validate_mod, "get_subtensor", fake_get_subtensor)
 
-    # Patch db_pool.init (noop)
-    monkeypatch.setattr(validate_mod.db_pool, "init", AsyncMock())
+    # When challenge changes, counter resets and last uid updates.
+    count, last = validate_mod._reset_no_score_if_challenge_changed("chal-2", "chal-1", 5)
+    assert count == 0
+    assert last == "chal-2"
 
-    # Patch _iter_scores_from_db to return scores (hk1 higher)
-    # Rows already sorted DESC by time (latest first) for a single challenge 'chal-X'
-    monkeypatch.setattr(validate_mod, "_iter_scores_from_db", AsyncMock(return_value=[
-        ("hk1", 0.95, "chal-X"),
-        ("hk2", 0.70, "chal-X"),
-        ("hk1", 0.90, "chal-X"),  # older hk1 score ignored for 'latest per miner'
-    ]))
+    # When challenge stays the same, values remain untouched.
+    count, last = validate_mod._reset_no_score_if_challenge_changed("chal-2", "chal-2", 3)
+    assert count == 3
+    assert last == "chal-2"
 
-    uids, weights, challenge_uid = await validate_mod.get_weights()
-    assert weights == [1.0]
-    # hk1 should map to uid 0 (order in FakeMeta.hotkeys)
-    assert uids == [0]
-    # Should return None when falling back to DB without current challenge
-    assert challenge_uid is None
-
-@pytest.mark.asyncio
-async def test_get_weights_no_data_defaults_uid0(monkeypatch):
-    """Test that with no data, get_weights returns default uid 248"""
-    # Avoid hitting utterance engine during tests
-    monkeypatch.setenv("BB_UTTERANCE_ENGINE_URL", "")
-    # Ensure skip count is well above any configured max to force fallback
-    max_skip_trigger = 1_000
-    class FakeMeta:
-        hotkeys = ["a", "b", "c"]
-    async def fake_get_subtensor():
-        class ST:
-            async def metagraph(self, netuid):
-                return FakeMeta()
-        return ST()
-    class FakeSettings:
-        BABELBIT_NETUID = 4
-        BITTENSOR_WALLET_COLD = "cold"
-        BITTENSOR_WALLET_HOT = "hot"
-        SIGNER_URL = "http://signer"
-    from babelbit.utils import settings as settings_mod
-    monkeypatch.setattr(settings_mod, "get_settings", lambda: FakeSettings())
-    from babelbit.cli import validate as validate_mod
-    monkeypatch.setattr(validate_mod, "get_subtensor", fake_get_subtensor)
-    monkeypatch.setattr(validate_mod.db_pool, "init", AsyncMock())
-    monkeypatch.setattr(validate_mod, "_iter_scores_from_db", AsyncMock(return_value=[]))
-    # Avoid network call to utterance engine
-    from babelbit.utils import predict_utterances as pred_mod
-    monkeypatch.setattr(pred_mod, "get_current_challenge_uid", AsyncMock(return_value=None))
-    
-    # Pass consecutive_skipped_epochs >= MAX to trigger fallback
-    uids, weights, challenge_uid = await validate_mod.get_weights(consecutive_skipped_epochs=max_skip_trigger)
-    # Code defaults to uid 248 when no data available after max skips
-    assert uids == [248]
-    assert weights == [1.0]
-    assert challenge_uid is None
-
-@pytest.mark.asyncio
-async def test_get_weights_multiple_challenges_uses_latest(monkeypatch):
-    class FakeMeta:
-        hotkeys = ["h1", "h2", "h3"]
-    async def fake_get_subtensor():
-        class ST:
-            async def metagraph(self, netuid):
-                return FakeMeta()
-        return ST()
-    class FakeSettings:
-        BABELBIT_NETUID = 10
-        BITTENSOR_WALLET_COLD = "cold"
-        BITTENSOR_WALLET_HOT = "hot"
-        SIGNER_URL = "http://signer"
-    from babelbit.utils import settings as settings_mod
-    monkeypatch.setattr(settings_mod, "get_settings", lambda: FakeSettings())
-    from babelbit.cli import validate as validate_mod
-    monkeypatch.setattr(validate_mod, "get_subtensor", fake_get_subtensor)
-    monkeypatch.setattr(validate_mod.db_pool, "init", AsyncMock())
-    # DESC order: latest challenge 'C2' first
-    scores = [
-        ("h1", 0.6, "C2"),
-        ("h2", 0.9, "C2"),  # winner in latest
-        ("h1", 0.55, "C2"),
-        ("h3", 0.95, "C1"),  # older challenge should be ignored
-        ("h2", 0.50, "C1"),
-    ]
-    monkeypatch.setattr(validate_mod, "_iter_scores_from_db", AsyncMock(return_value=scores))
-    uids, weights, challenge_uid = await validate_mod.get_weights()
-    assert uids == [1]  # h2 index
-    assert weights == [1.0]
-    assert challenge_uid is None  # Fallback to DB without current challenge
+    # When current is missing, leave counters alone.
+    count, last = validate_mod._reset_no_score_if_challenge_changed(None, "chal-2", 4)
+    assert count == 4
+    assert last == "chal-2"
 
 
 @pytest.mark.asyncio
-async def test_get_weights_returns_challenge_uid(monkeypatch):
-    """Test that get_weights returns the current challenge UID for tracking"""
-    class FakeMeta:
-        hotkeys = ["h1", "h2"]
-    
-    async def fake_get_subtensor():
-        class ST:
-            async def metagraph(self, netuid):
-                return FakeMeta()
-        return ST()
-    
-    class FakeSettings:
-        BABELBIT_NETUID = 1
-        BITTENSOR_WALLET_COLD = "cold"
-        BITTENSOR_WALLET_HOT = "hot"
-        SIGNER_URL = "http://signer"
-    
-    from babelbit.utils import settings as settings_mod
-    monkeypatch.setattr(settings_mod, "get_settings", lambda: FakeSettings())
+async def test_get_weights_selects_winner_and_resets_counter(monkeypatch):
+    """Pick the highest score from API results and reset the miss counter."""
+    fake_settings = SimpleNamespace(BB_SUBMIT_API_URL="http://api")
     from babelbit.cli import validate as validate_mod
-    monkeypatch.setattr(validate_mod, "get_subtensor", fake_get_subtensor)
-    monkeypatch.setattr(validate_mod.db_pool, "init", AsyncMock())
-    
-    # Mock challenge status checks
-    monkeypatch.setattr(validate_mod, "is_challenge_processed", lambda uid: True)
-    monkeypatch.setattr(validate_mod, "is_challenge_processed_db", AsyncMock(return_value=True))
-    
-    # Mock get_current_challenge_uid to return a specific challenge
-    from babelbit.utils import predict_utterances as pred_mod
-    monkeypatch.setattr(pred_mod, "get_current_challenge_uid", AsyncMock(return_value="challenge-abc-123"))
-    
-    # Mock _iter_scores_for_challenge to return scores
-    from babelbit.utils import db_pool as db_pool_mod
-    monkeypatch.setattr(db_pool_mod, "_iter_scores_for_challenge", AsyncMock(return_value=[
-        ("h1", 0.85),
-        ("h2", 0.90),
-    ]))
-    
-    uids, weights, challenge_uid = await validate_mod.get_weights()
-    
-    # Should return the current challenge UID
-    assert challenge_uid == "challenge-abc-123"
-    assert uids == [1]  # h2 is winner
-    assert weights == [1.0]
 
-
-@pytest.mark.asyncio
-async def test_get_weights_skips_unprocessed_challenge(monkeypatch):
-    """Test that get_weights uses last challenge when current is unprocessed"""
-    # Use dummy URL so mocked get_current_challenge_uid is invoked
-    monkeypatch.setenv("BB_UTTERANCE_ENGINE_URL", "http://test")
-    max_skip_trigger = 1_000
-    class FakeMeta:
-        hotkeys = ["h1", "h2"]
-    
-    async def fake_get_subtensor():
-        class ST:
-            async def metagraph(self, netuid):
-                return FakeMeta()
-        return ST()
-    
-    class FakeSettings:
-        BABELBIT_NETUID = 1
-        BITTENSOR_WALLET_COLD = "cold"
-        BITTENSOR_WALLET_HOT = "hot"
-        SIGNER_URL = "http://signer"
-    
-    from babelbit.utils import settings as settings_mod
-    monkeypatch.setattr(settings_mod, "get_settings", lambda: FakeSettings())
-    from babelbit.cli import validate as validate_mod
-    monkeypatch.setattr(validate_mod, "get_subtensor", fake_get_subtensor)
-    monkeypatch.setattr(validate_mod.db_pool, "init", AsyncMock())
-    
-    # Mock challenge status checks - current challenge NOT processed
-    monkeypatch.setattr(validate_mod, "is_challenge_processed", lambda uid: False)
-    monkeypatch.setattr(validate_mod, "is_challenge_processed_db", AsyncMock(return_value=False))
-    
-    # Mock get_current_challenge_uid
-    from babelbit.utils import predict_utterances as pred_mod
-    monkeypatch.setattr(pred_mod, "get_current_challenge_uid", AsyncMock(return_value="challenge-unprocessed"))
-    # Avoid DB call when we stick with current challenge and max skips
-    from babelbit.utils import db_pool as db_pool_mod
-    monkeypatch.setattr(db_pool_mod, "_iter_scores_for_challenge", AsyncMock(return_value=[]))
-    
-    # Mock DB to return scores from last challenge
+    monkeypatch.setattr(validate_mod, "get_settings", lambda: fake_settings)
     monkeypatch.setattr(
-        validate_mod, 
-        "_iter_scores_from_db", 
-        AsyncMock(return_value=[("h1", 0.8, "challenge-old"), ("h2", 0.6, "challenge-old")])
+        validate_mod,
+        "fetch_scores_from_api",
+        AsyncMock(
+            return_value=[
+                {"miner_hotkey": "hk1", "challenge_mean_score": 0.7},
+                {"miner_hotkey": "hk2", "challenge_mean_score": 0.9},
+                {"miner_hotkey": "hk2", "challenge_mean_score": 1.1},  # ignored (first occurrence kept)
+                {"hotkey": "unknown", "challenge_mean_score": 2.0},  # not in metagraph
+            ]
+        ),
     )
-    
-    # Call with consecutive_skipped_epochs < MAX (should use last challenge)
-    uids, weights, challenge_uid = await validate_mod.get_weights(consecutive_skipped_epochs=2)
-    
-    # Should return weights from last challenge (h1 wins with 0.8)
-    assert uids == [0]  # h1 is at index 0 in hotkeys
+
+    fake_meta = SimpleNamespace(hotkeys=["hk1", "hk2"])
+    validator_kp = SimpleNamespace(ss58_address="validator-hk")
+
+    uids, weights, no_score_rounds = await validate_mod.get_weights(
+        metagraph=fake_meta,
+        validator_kp=validator_kp,
+        challenge_uid="chal-1",
+        last_weights=None,
+        no_score_rounds=3,
+        max_no_score_rounds=5,
+        default_uid=248,
+    )
+
+    assert uids == [1]  # hk2 is the winner at index 1
     assert weights == [1.0]
-    # Challenge UID should be None since we fell back to DB query
-    assert challenge_uid is None
-    
-    # Test with no historical data either - should return empty
-    monkeypatch.setattr(validate_mod, "_iter_scores_from_db", AsyncMock(return_value=[]))
-    
-    uids, weights, challenge_uid = await validate_mod.get_weights(consecutive_skipped_epochs=2)
-    
-    # Should return empty weights when no historical data
+    assert no_score_rounds == 0
+
+
+@pytest.mark.asyncio
+async def test_get_weights_updates_metrics_and_prefers_first_occurrence(monkeypatch):
+    """Ensure metrics are updated and the first score per miner is kept."""
+    fake_settings = SimpleNamespace(BB_SUBMIT_API_URL="http://api")
+    from babelbit.cli import validate as validate_mod
+
+    monkeypatch.setattr(validate_mod, "get_settings", lambda: fake_settings)
+    monkeypatch.setattr(
+        validate_mod,
+        "fetch_scores_from_api",
+        AsyncMock(
+            return_value=[
+                {"hotkey": "hk1", "score": 0.4},
+                {"hotkey": "hk2", "score": 0.9},
+                {"hotkey": "hk2", "score": 1.2},  # ignored (first score wins)
+                {"hotkey": "hk3", "score": None},  # ignored missing score
+            ]
+        ),
+    )
+
+    scores_gauge = FakeGauge()
+    winner_gauge = FakeSingleGauge()
+    monkeypatch.setattr(validate_mod, "SCORES_BY_UID", scores_gauge)
+    monkeypatch.setattr(validate_mod, "CURRENT_WINNER", winner_gauge)
+
+    uids, weights, no_score_rounds = await validate_mod.get_weights(
+        metagraph=SimpleNamespace(hotkeys=["hk1", "hk2", "hk3"]),
+        validator_kp=SimpleNamespace(ss58_address="validator-hk"),
+        challenge_uid="chal-metrics",
+        last_weights=None,
+        no_score_rounds=0,
+        max_no_score_rounds=5,
+        default_uid=248,
+    )
+
+    assert uids == [1]  # hk2 wins
+    assert weights == [1.0]
+    assert no_score_rounds == 0
+    assert ("0", 0.4) in scores_gauge.calls
+    assert ("1", 0.9) in scores_gauge.calls
+    assert winner_gauge.value == 1
+
+
+@pytest.mark.asyncio
+async def test_get_weights_reuses_last_weights_when_no_scores(monkeypatch):
+    """When API returns nothing, reuse the previous weights and increment counter."""
+    fake_settings = SimpleNamespace(BB_SUBMIT_API_URL="http://api")
+    from babelbit.cli import validate as validate_mod
+
+    monkeypatch.setattr(validate_mod, "get_settings", lambda: fake_settings)
+    monkeypatch.setattr(validate_mod, "fetch_scores_from_api", AsyncMock(return_value=[]))
+
+    fake_meta = SimpleNamespace(hotkeys=["hk1", "hk2"])
+    last_weights = ([0], [1.0])
+
+    uids, weights, no_score_rounds = await validate_mod.get_weights(
+        metagraph=fake_meta,
+        validator_kp=SimpleNamespace(ss58_address="validator-hk"),
+        challenge_uid=None,
+        last_weights=last_weights,
+        no_score_rounds=2,
+        max_no_score_rounds=5,
+        default_uid=248,
+    )
+
+    assert (uids, weights) == last_weights
+    assert no_score_rounds == 3
+
+
+@pytest.mark.asyncio
+async def test_get_weights_waits_before_defaulting(monkeypatch):
+    """Without scores or history, wait for more rounds until the limit is reached."""
+    fake_settings = SimpleNamespace(BB_SUBMIT_API_URL="http://api")
+    from babelbit.cli import validate as validate_mod
+
+    monkeypatch.setattr(validate_mod, "get_settings", lambda: fake_settings)
+    # API returns scores, but none match known hotkeys => treated as no scores
+    monkeypatch.setattr(
+        validate_mod,
+        "fetch_scores_from_api",
+        AsyncMock(return_value=[{"miner_hotkey": "unknown", "challenge_mean_score": 0.9}]),
+    )
+
+    uids, weights, no_score_rounds = await validate_mod.get_weights(
+        metagraph=SimpleNamespace(hotkeys=["hk1"]),
+        validator_kp=SimpleNamespace(ss58_address="validator-hk"),
+        challenge_uid="chal-2",
+        last_weights=None,
+        no_score_rounds=0,
+        max_no_score_rounds=2,
+        default_uid=248,
+    )
+
     assert uids == []
     assert weights == []
-    assert challenge_uid is None
-    
-    # Call with consecutive_skipped_epochs >= MAX (should fallback to uid 248)
-    uids, weights, challenge_uid = await validate_mod.get_weights(consecutive_skipped_epochs=max_skip_trigger)
-    
-    # Should fall back to uid 248
-    assert uids == [248]
-    assert weights == [1.0]
-    # When falling back to uid 248 from current unprocessed challenge, we still return the challenge UID
-    # This allows the main loop to track which challenge triggered the fallback
-    assert challenge_uid == "challenge-unprocessed"
+    assert no_score_rounds == 1
 
 
 @pytest.mark.asyncio
-async def test_get_weights_fallback_stale_challenge_defaults(monkeypatch):
-    """If fallback challenge data is older than 12h, default to uid 248 immediately."""
-    class FakeMeta:
-        hotkeys = ["h1", "h2"]
-
-    async def fake_get_subtensor():
-        class ST:
-            async def metagraph(self, netuid):
-                return FakeMeta()
-        return ST()
-
-    class FakeSettings:
-        BABELBIT_NETUID = 1
-        BITTENSOR_WALLET_COLD = "cold"
-        BITTENSOR_WALLET_HOT = "hot"
-        SIGNER_URL = "http://signer"
-
-    from babelbit.utils import settings as settings_mod
-    monkeypatch.setattr(settings_mod, "get_settings", lambda: FakeSettings())
-
+async def test_get_weights_falls_back_to_default_after_limit(monkeypatch):
+    """After exceeding the max no-score rounds, fall back to the default UID."""
+    fake_settings = SimpleNamespace(BB_SUBMIT_API_URL="http://api")
     from babelbit.cli import validate as validate_mod
-    monkeypatch.setattr(validate_mod, "get_subtensor", fake_get_subtensor)
-    monkeypatch.setattr(validate_mod.db_pool, "init", AsyncMock())
 
-    # Avoid hitting the network for current challenge lookup
-    from babelbit.utils import predict_utterances as pred_mod
-    monkeypatch.setattr(pred_mod, "get_current_challenge_uid", AsyncMock(return_value=None))
+    monkeypatch.setattr(validate_mod, "get_settings", lambda: fake_settings)
+    monkeypatch.setattr(validate_mod, "fetch_scores_from_api", AsyncMock(return_value=[]))
 
-    stale_ts = datetime.now(timezone.utc) - timedelta(hours=13)
-    monkeypatch.setattr(
-        validate_mod,
-        "_iter_scores_from_db",
-        AsyncMock(return_value=[
-            ("h1", 0.7, "challenge-old", stale_ts),
-            ("h2", 0.8, "challenge-old", stale_ts),
-        ]),
+    uids, weights, no_score_rounds = await validate_mod.get_weights(
+        metagraph=SimpleNamespace(hotkeys=["hk1"]),
+        validator_kp=SimpleNamespace(ss58_address="validator-hk"),
+        challenge_uid="chal-3",
+        last_weights=None,
+        no_score_rounds=3,
+        max_no_score_rounds=3,
+        default_uid=999,
     )
 
-    uids, weights, challenge_uid = await validate_mod.get_weights(consecutive_skipped_epochs=2)
-
-    assert uids == [248]
+    assert uids == [999]
     assert weights == [1.0]
-    assert challenge_uid is None
+    assert no_score_rounds == 4
 
 
 @pytest.mark.asyncio
-async def test_get_weights_fallback_stale_challenge_defaults_after_max(monkeypatch):
-    """If fallback challenge data is older than 12h and max skips exceeded, default to uid 248."""
-    class FakeMeta:
-        hotkeys = ["h1", "h2"]
-
-    async def fake_get_subtensor():
-        class ST:
-            async def metagraph(self, netuid):
-                return FakeMeta()
-        return ST()
-
-    class FakeSettings:
-        BABELBIT_NETUID = 1
-        BITTENSOR_WALLET_COLD = "cold"
-        BITTENSOR_WALLET_HOT = "hot"
-        SIGNER_URL = "http://signer"
-
-    from babelbit.utils import settings as settings_mod
-    monkeypatch.setattr(settings_mod, "get_settings", lambda: FakeSettings())
-
+async def test_fetch_scores_from_api_success(monkeypatch):
+    """Ensure fetch_scores_from_api signs and passes expected params."""
     from babelbit.cli import validate as validate_mod
-    monkeypatch.setattr(validate_mod, "get_subtensor", fake_get_subtensor)
-    monkeypatch.setattr(validate_mod.db_pool, "init", AsyncMock())
 
-    from babelbit.utils import predict_utterances as pred_mod
-    monkeypatch.setattr(pred_mod, "get_current_challenge_uid", AsyncMock(return_value=None))
+    fake_session = MockSession(
+        get_response=MockResponse(
+            status=200,
+            json_data={"scores": [{"hotkey": "hk1", "score": 0.8}]},
+        )
+    )
+    canonical_holder = {}
 
-    stale_ts = datetime.now(timezone.utc) - timedelta(hours=13)
-    monkeypatch.setattr(
-        validate_mod,
-        "_iter_scores_from_db",
-        AsyncMock(return_value=[
-            ("h1", 0.7, "challenge-old", stale_ts),
-            ("h2", 0.8, "challenge-old", stale_ts),
-        ]),
+    def fake_sign(kp, canonical):
+        canonical_holder["payload"] = canonical
+        return "sig"
+
+    validator_kp = SimpleNamespace(ss58_address="validator-hk")
+    monkeypatch.setattr(validate_mod, "get_async_client", AsyncMock(return_value=fake_session))
+    monkeypatch.setattr(validate_mod, "sign_message", fake_sign)
+
+    scores = await validate_mod.fetch_scores_from_api(
+        base_url="http://submit-api",
+        validator_kp=validator_kp,
+        challenge_uid="chal-xyz",
     )
 
-    uids, weights, challenge_uid = await validate_mod.get_weights(consecutive_skipped_epochs=6)
+    assert scores == [{"hotkey": "hk1", "score": 0.8}]
+    url, params = fake_session.get_calls[0]
+    assert url == "http://submit-api/v1/get_scores"
+    assert params["signature"] == "sig"
+    assert params["hotkey"] == validator_kp.ss58_address
+    assert params["challenge_uid"] == "chal-xyz"
+    assert isinstance(params["timestamp"], int)
 
-    assert uids == [248]
-    assert weights == [1.0]
-    assert challenge_uid is None
+    # Canonical payload should match the expected structure
+    parsed = json.loads(canonical_holder["payload"])
+    assert parsed["hotkey"] == validator_kp.ss58_address
+    assert parsed["challenge_id"] == "chal-xyz"
+    assert parsed["data"]["challenge_uid"] == "chal-xyz"
+    assert isinstance(parsed["timestamp"], int)
+
+
+@pytest.mark.asyncio
+async def test_fetch_scores_from_api_handles_errors(monkeypatch):
+    """Non-200 or request failures should return an empty list."""
+    from babelbit.cli import validate as validate_mod
+
+    validator_kp = SimpleNamespace(ss58_address="validator-hk")
+    error_session = MockSession(
+        get_response=MockResponse(status=500, json_data={"error": "bad"}, text_data="bad")
+    )
+    monkeypatch.setattr(validate_mod, "get_async_client", AsyncMock(return_value=error_session))
+    monkeypatch.setattr(validate_mod, "sign_message", lambda *_args, **_kwargs: "sig")
+    scores = await validate_mod.fetch_scores_from_api("http://api", validator_kp, "chal")
+    assert scores == []
+
+    failing_session = MockSession(get_exc=RuntimeError("boom"))
+    monkeypatch.setattr(validate_mod, "get_async_client", AsyncMock(return_value=failing_session))
+    scores = await validate_mod.fetch_scores_from_api("http://api", validator_kp, "chal")
+    assert scores == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_scores_from_api_skips_without_challenge(monkeypatch):
+    """If challenge UID is missing, do nothing."""
+    from babelbit.cli import validate as validate_mod
+
+    validator_kp = SimpleNamespace(ss58_address="validator-hk")
+
+    async def should_not_call():
+        raise AssertionError("get_async_client should not be called when challenge is missing")
+
+    monkeypatch.setattr(validate_mod, "get_async_client", should_not_call)
+    scores = await validate_mod.fetch_scores_from_api("http://api", validator_kp, None)
+    assert scores == []
+
+
+@pytest.mark.asyncio
+async def test_retry_set_weights_prefers_signer_success(monkeypatch):
+    """Return True when signer responds with success and avoid fallback."""
+    from babelbit.cli import validate as validate_mod
+
+    fake_settings = SimpleNamespace(BABELBIT_NETUID=11, SIGNER_URL="http://signer")
+    monkeypatch.setattr(validate_mod, "get_settings", lambda: fake_settings)
+
+    session = MockSession(post_response=MockResponse(status=200, json_data={"success": True}))
+
+    fake_aiohttp = SimpleNamespace(
+        ClientSession=lambda timeout: session,
+        ClientConnectorError=FakeConnectorError,
+        ClientTimeout=lambda **kwargs: FakeTimeout(**kwargs),
+    )
+    monkeypatch.setitem(sys.modules, "aiohttp", fake_aiohttp)
+
+    fallback = AsyncMock(return_value=False)
+    monkeypatch.setattr(validate_mod, "_set_weights_with_confirmation", fallback)
+
+    ok = await validate_mod.retry_set_weights(wallet="wallet", uids=[1, 2], weights=[0.5, 0.5])
+
+    assert ok is True
+    assert session.post_calls[0][0] == "http://signer/set_weights"
+    assert fallback.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_retry_set_weights_falls_back_on_failure(monkeypatch):
+    """When signer fails or times out, fallback should be invoked."""
+    from babelbit.cli import validate as validate_mod
+
+    fake_settings = SimpleNamespace(BABELBIT_NETUID=7, SIGNER_URL="http://signer")
+    monkeypatch.setattr(validate_mod, "get_settings", lambda: fake_settings)
+    monkeypatch.setenv("BB_SET_WEIGHTS_RETRIES", "3")
+    monkeypatch.setenv("BB_SET_WEIGHTS_RETRY_DELAY", "0.1")
+
+    # First call: signer returns non-200, triggering fallback
+    session = MockSession(post_response=MockResponse(status=500, json_data={"success": False}))
+
+    fake_aiohttp = SimpleNamespace(
+        ClientSession=lambda timeout: session,
+        ClientConnectorError=FakeConnectorError,
+        ClientTimeout=lambda **kwargs: FakeTimeout(**kwargs),
+    )
+    monkeypatch.setitem(sys.modules, "aiohttp", fake_aiohttp)
+
+    fallback = AsyncMock(return_value=True)
+    monkeypatch.setattr(validate_mod, "_set_weights_with_confirmation", fallback)
+
+    ok = await validate_mod.retry_set_weights(wallet="wallet", uids=[3], weights=[1.0])
+    assert ok is True
+    fallback.assert_awaited_once_with("wallet", 7, [3], [1.0], retries=3, delay_s=0.1)
+
+    # Second call: signer raises connector error, still uses fallback
+    error_session = MockSession(post_exc=FakeConnectorError("no network"))
+    fake_aiohttp_error = SimpleNamespace(
+        ClientSession=lambda timeout: error_session,
+        ClientConnectorError=FakeConnectorError,
+        ClientTimeout=lambda **kwargs: FakeTimeout(**kwargs),
+    )
+    monkeypatch.setitem(sys.modules, "aiohttp", fake_aiohttp_error)
+    fallback = AsyncMock(return_value=True)
+    monkeypatch.setattr(validate_mod, "_set_weights_with_confirmation", fallback)
+
+    ok = await validate_mod.retry_set_weights(wallet="wallet", uids=[4], weights=[1.0])
+    assert ok is True
+    assert fallback.await_count == 1
+
+    # Third call: signer raises timeout, still uses fallback
+    timeout_session = MockSession(post_exc=asyncio.TimeoutError())
+    fake_aiohttp_timeout = SimpleNamespace(
+        ClientSession=lambda timeout: timeout_session,
+        ClientConnectorError=FakeConnectorError,
+        ClientTimeout=lambda **kwargs: FakeTimeout(**kwargs),
+    )
+    monkeypatch.setitem(sys.modules, "aiohttp", fake_aiohttp_timeout)
+    fallback = AsyncMock(return_value=True)
+    monkeypatch.setattr(validate_mod, "_set_weights_with_confirmation", fallback)
+
+    ok = await validate_mod.retry_set_weights(wallet="wallet", uids=[5], weights=[1.0])
+    assert ok is True
+    assert fallback.await_count == 1

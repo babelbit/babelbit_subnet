@@ -28,12 +28,9 @@ from babelbit.utils.file_handling import (
     save_challenge_summary_file,
 )
 from datetime import timezone
-from babelbit.utils.db_pool import (
-    db_pool,
-    insert_scoring_staging,
-    insert_scoring_submissions_bulk,
-)
+
 from babelbit.utils.challenge_status import mark_challenge_processed
+from babelbit.utils.validation_submission import ValidationSubmissionClient
 
 # Scoring policy: Runner performs per-dialogue scoring using score_dialogue.score_jsonl
 # immediately after writing the raw dialogue JSONL, then persists both dialogue score JSONs
@@ -96,19 +93,6 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
         str(logs_dir), str(scores_dir), str(output_dir),
     )
 
-    # Database write configuration (opt-in so tests / local runs without PG don't fail)
-    db_enabled = os.getenv("BB_ENABLE_DB_WRITES", "0").lower() in {"1", "true", "yes"}
-    db_ready = False
-    if db_enabled:
-        try:
-            await db_pool.init()
-            db_ready = True
-            logger.info("DB pool initialized (writes enabled)")
-        except Exception as e:
-            logger.warning("DB initialization failed; disabling DB writes: %s", e)
-            db_ready = False
-    logger.debug("[runner] DB writes enabled=%s ready=%s", db_enabled, db_ready)
-
     s3_enabled = os.getenv("BB_ENABLE_S3_UPLOADS", "0").lower() in {"1", "true", "yes"}
     global s3_manager
     if s3_enabled and s3_manager is None:
@@ -129,6 +113,13 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
             logger.warning("S3 Manager initialization failed; disabling S3 uploads: %s", e)
             s3_manager = None
     logger.debug("[runner] S3 uploads enabled=%s active=%s", s3_enabled, bool(s3_manager))
+
+    submission_client = ValidationSubmissionClient()
+    logger.debug(
+        "[runner] validation submissions ready=%s endpoint=%s",
+        submission_client.is_ready,
+        submission_client.submit_url if submission_client else "N/A",
+    )
 
     try:
         challenge_uid = await get_current_challenge_uid(utterance_engine_url)
@@ -343,6 +334,20 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
                         s3_log_path = f"{settings.S3_LOG_DIR}/logs/{events_path.name}"
                         s3_manager.upload_file(str(events_path), s3_log_path)
                         logger.info(f"Uploaded raw dialogue log to S3: s3://{s3_manager.bucket_name}/{s3_log_path}")
+                    if submission_client.is_ready:
+                        try:
+                            await submission_client.submit_validation_file(
+                                file_path=events_path,
+                                file_type="dialogue_run",
+                                kind="dialogue_logs",
+                                challenge_id=challenge_uid or "",
+                                miner_uid=getattr(m, "uid", None),
+                                miner_hotkey=getattr(m, "hotkey", None),
+                                dialogue_uid=dialogue_uid,
+                                s3_path=s3_log_path if s3_manager else None,
+                            )
+                        except Exception as e:
+                            logger.warning("Validation submission error for %s: %s", events_path.name, e)
 
                     if score_jsonl is None:
                         logger.warning("score_jsonl unavailable; skipping scoring for dialogue %s", dialogue_uid)
@@ -369,45 +374,21 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
                             s3_sub_path = f"submissions/{Path(score_path).name}"
                             s3_manager.upload_file(str(score_path), s3_sub_path)
                             logger.info(f"Uploaded dialogue score to S3: s3://{s3_manager.bucket_name}/{s3_sub_path}")
-                        if db_ready:
-                            # Insert scoring staging doc
+                        if submission_client.is_ready:
                             try:
-                                now_utc = datetime.now(timezone.utc)
-                                staging_id = await insert_scoring_staging(
-                                    file_content=scored_doc,
-                                    file_path=str(score_path),
-                                    json_created_at=now_utc,
+                                await submission_client.submit_validation_file(
+                                    file_path=Path(score_path),
+                                    file_type="dialogue_scores",
+                                    kind="dialogue_scores",
+                                    challenge_id=challenge_uid or "",
+                                    miner_uid=getattr(m, "uid", None),
+                                    miner_hotkey=getattr(m, "hotkey", None),
+                                    dialogue_uid=dialogue_uid,
+                                    s3_path=s3_sub_path if s3_manager else None,
                                 )
-                                logger.debug("[runner] inserted scoring_staging id=%s for dialogue %s", str(staging_id), dialogue_uid)
                             except Exception as e:
-                                logger.warning("Failed to insert scoring_staging row: %s", e)
-                                staging_id = None
-                            # Prepare per-utterance rows -> scoring_submissions_bulk
-                            if staging_id is not None:
-                                try:
-                                    rows = []
-                                    dialogue_average = scored_doc.get("dialogue_summary", {}).get("average_U_best_early")
-                                    now_ts = datetime.now(timezone.utc)
-                                    for utt in scored_doc.get("utterances", []):
-                                        rows.append({
-                                            "scoring_staging_id": staging_id,
-                                            "challenge_uid": challenge_uid,
-                                            "dialogue_uid": dialogue_uid,
-                                            "miner_uid": getattr(m, 'uid', None),
-                                            "miner_hotkey": getattr(m, 'hotkey', None),
-                                            "utterance_number": utt.get("utterance_number"),
-                                            "ground_truth": utt.get("ground_truth"),
-                                            "best_step": utt.get("best_step"),
-                                            "u_best": utt.get("U_best"),
-                                            "total_steps": utt.get("total_steps"),
-                                            "average_u_best_early": dialogue_average,
-                                            "json_created_at": now_ts,
-                                            "staging_inserted_at": now_ts,
-                                        })
-                                    await insert_scoring_submissions_bulk(rows)
-                                    logger.debug("[runner] inserted scoring_submissions rows=%d (dialogue %s)", len(rows), dialogue_uid)
-                                except Exception as e:
-                                    logger.warning("Failed bulk insert scoring_submissions: %s", e)
+                                logger.warning("Validation submission error for %s: %s", score_path, e)
+
                     except Exception as e:
                         logger.warning("Failed scoring dialogue %s: %s", dialogue_uid, e)
 
@@ -441,18 +422,21 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
                             s3_sub_path = f"submissions/{Path(summary_path).name}"
                             s3_manager.upload_file(str(summary_path), s3_sub_path)
                             logger.info(f"Uploaded challenge summary to S3: s3://{s3_manager.bucket_name}/{s3_sub_path}")
-                        # Optional: store summary JSON in scoring staging as well
-                        if db_ready:
+                        if submission_client.is_ready:
                             try:
-                                now_utc = datetime.now(timezone.utc)
-                                await insert_scoring_staging(
-                                    file_content=summary,
-                                    file_path=str(summary_path),
-                                    json_created_at=now_utc,
+                                await submission_client.submit_validation_file(
+                                    file_path=Path(summary_path),
+                                    file_type="challenge_scores",
+                                    kind="challenge_scores",
+                                    challenge_id=challenge_uid or "",
+                                    miner_uid=getattr(m, "uid", None),
+                                    miner_hotkey=getattr(m, "hotkey", None),
+                                    dialogue_uid=None,
+                                    s3_path=s3_sub_path if s3_manager else None,
                                 )
-                                logger.debug("[runner] inserted summary into scoring_staging for miner %s", miner_id)
                             except Exception as e:
-                                logger.warning("Failed to insert challenge summary scoring_staging: %s", e)
+                                logger.warning("Validation submission error for %s: %s", summary_path, e)
+
                     except Exception as e:
                         logger.warning("Failed to save challenge summary for miner %s: %s", getattr(m,'uid', '?'), e)
                 else:
@@ -495,14 +479,6 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
         logger.error(f"Runner failed: {type(e).__name__}: {e}", exc_info=True)
     finally:
         close_http_clients()
-        # Cleanup DB pool if it was initialized
-        if db_ready:
-            try:
-                await db_pool.close()
-                logger.info("DB pool closed after runner execution")
-            except Exception as e:
-                logger.warning("Failed to close DB pool: %s", e)
-    # Outputs persisted separately: raw logs in logs_dir, scores in scores_dir
 
 
 async def runner_loop():
@@ -659,9 +635,3 @@ async def runner_loop():
         # Ensure cleanup on exit
         logger.info("[RunnerLoop] Shutting down, cleaning up resources...")
         close_http_clients()
-        # Close DB pool if it exists
-        try:
-            await db_pool.close()
-            logger.info("[RunnerLoop] DB pool closed")
-        except Exception as e:
-            logger.warning(f"[RunnerLoop] Error closing DB pool: {e}")

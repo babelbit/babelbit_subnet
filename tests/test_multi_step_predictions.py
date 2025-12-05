@@ -11,10 +11,10 @@ from babelbit.cli import runner as runner_mod
 # Semantic scoring disabled: if score_jsonl is unavailable, skip scoring-dependent tests
 if getattr(runner_mod, "score_jsonl", None) is None:  # pragma: no cover
     pytest.skip("score_jsonl unavailable (semantic scoring reverted)", allow_module_level=True)
-import asyncio
+
 import json
 import os
-from unittest.mock import Mock, AsyncMock, patch, MagicMock
+from unittest.mock import Mock, AsyncMock, patch
 from pathlib import Path
 
 from babelbit.cli.runner import runner, group_steps_into_utterances
@@ -184,11 +184,7 @@ class TestMultiStepPredictions:
              patch('babelbit.cli.runner.predict_with_utterance_engine_multi_miner', new_callable=AsyncMock, return_value=multi_miner_result), \
              patch('babelbit.cli.runner.close_http_clients'), \
              patch('babelbit.cli.runner.init_utterance_auth'), \
-             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock), \
-             patch('babelbit.cli.runner.db_pool') as mock_db_pool:
-            
-            # Mock DB as not ready to avoid DB operations
-            mock_db_pool.is_ready.return_value = False
+             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock):
             
             # Run the function
             with patch.dict('os.environ', {'BB_OUTPUT_LOGS_DIR': temp_test_dir['logs']}):
@@ -246,11 +242,7 @@ class TestMultiStepPredictions:
              patch('babelbit.cli.runner.predict_with_utterance_engine_multi_miner', new_callable=AsyncMock, return_value=multi_miner_result), \
              patch('babelbit.cli.runner.close_http_clients'), \
              patch('babelbit.cli.runner.init_utterance_auth'), \
-             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock), \
-             patch('babelbit.cli.runner.db_pool') as mock_db_pool:
-            
-            # Mock DB as not ready
-            mock_db_pool.is_ready.return_value = False
+             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock):
             
             # Run the function
             with patch.dict('os.environ', {'BB_OUTPUT_LOGS_DIR': temp_test_dir['logs']}):
@@ -289,171 +281,6 @@ class TestMultiStepPredictions:
                 assert 'semantic_similarity' in step
                 assert 'earliness' in step
                 assert 'U_step' in step
-
-
-class TestMinerIdentifiersInDatabase:
-    """Test that miner identifiers are properly saved to scoring_submissions"""
-
-    @pytest.mark.asyncio
-    async def test_scoring_submissions_includes_miner_identifiers(
-        self,
-        mock_settings,
-        test_miner,
-        multi_step_dialogue_utterances,
-        temp_test_dir,
-    ):
-        """Test that bulk insert to scoring_submissions includes miner_uid and miner_hotkey"""
-        
-        # Track calls to insert_scoring_submissions_bulk
-        captured_rows = []
-        
-        async def mock_insert_submissions(rows):
-            captured_rows.extend(rows)
-        
-        # Convert to multi_miner format (using hotkey as key)
-        multi_miner_result = {
-            test_miner.hotkey: multi_step_dialogue_utterances
-        }
-        
-        with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
-             patch('babelbit.cli.runner.get_current_challenge_uid', new_callable=AsyncMock, return_value="challenge-db") as mock_get_challenge, \
-             patch('babelbit.cli.runner.get_miners_from_registry', new_callable=AsyncMock, return_value={1: test_miner}), \
-             patch('babelbit.cli.runner.predict_with_utterance_engine_multi_miner', new_callable=AsyncMock, return_value=multi_miner_result), \
-             patch('babelbit.cli.runner.close_http_clients'), \
-             patch('babelbit.cli.runner.init_utterance_auth'), \
-             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock), \
-             patch('babelbit.cli.runner.db_pool') as mock_db_pool, \
-             patch('babelbit.cli.runner.insert_scoring_staging', new_callable=AsyncMock, return_value=12345), \
-             patch('babelbit.cli.runner.insert_scoring_submissions_bulk', new_callable=AsyncMock, side_effect=mock_insert_submissions):
-            
-            # Mock DB as ready - need to mock both init and is_ready
-            mock_db_pool.init = AsyncMock()
-            mock_db_pool.is_ready.return_value = True
-            
-            # Run the function with DB writes enabled
-            with patch.dict('os.environ', {
-                'BB_OUTPUT_LOGS_DIR': temp_test_dir['logs'],
-                'BB_ENABLE_DB_WRITES': '1'
-            }):
-                await runner(output_dir=temp_test_dir['scores'])
-            
-            # Print the score summary from the generated file
-            scores_dir = Path(temp_test_dir['scores'])
-            score_files = list(scores_dir.glob("dialogue_run_*-score.json"))
-            if score_files:
-                with open(score_files[0], 'r') as f:
-                    score_data = json.load(f)
-                print_score_summary(score_data)
-            
-            # Verify that rows were captured
-            assert len(captured_rows) > 0, "No rows were inserted to scoring_submissions"
-            
-            # Print database row summary
-            print("\n" + "=" * 80)
-            print(f"Database Rows Inserted: {len(captured_rows)} rows")
-            print("=" * 80)
-            print(f"{'Row':<5}{'Miner UID':<12}{'Miner Hotkey':<50}{'Utterance':<12}")
-            print("-" * 80)
-            for i, row in enumerate(captured_rows[:5]):  # Show first 5 rows
-                print(f"{i+1:<5}{row.get('miner_uid', 'N/A'):<12}{row.get('miner_hotkey', 'N/A')[:48]:<50}{row.get('utterance_number', 'N/A'):<12}")
-            if len(captured_rows) > 5:
-                print(f"... and {len(captured_rows) - 5} more rows")
-            print("=" * 80 + "\n")
-            
-            # Verify each row has miner_uid and miner_hotkey
-            for row in captured_rows:
-                assert 'miner_uid' in row, f"Row missing miner_uid: {row}"
-                assert 'miner_hotkey' in row, f"Row missing miner_hotkey: {row}"
-                assert row['miner_uid'] == 1, f"Expected miner_uid=1, got {row['miner_uid']}"
-                assert row['miner_hotkey'] == "5EWYcjAe8rL8HoGJRZtZwK8s9vaKCWAfc9rSjNNydSva3Syc", \
-                    f"Incorrect miner_hotkey: {row['miner_hotkey']}"
-
-    @pytest.mark.asyncio
-    async def test_multiple_miners_get_different_identifiers(
-        self,
-        mock_settings,
-        multi_step_dialogue_utterances,
-        temp_test_dir,
-    ):
-        """Test that different miners get their own uid/hotkey in database"""
-        
-        # Create two different miners
-        miner1 = Miner(uid=1, hotkey="hotkey_1", model="m1", revision="main", 
-                      slug="miner-1", chute_id="c1", block=100)
-        miner2 = Miner(uid=2, hotkey="hotkey_2", model="m2", revision="main",
-                      slug="miner-2", chute_id="c2", block=101)
-        
-        miners = {1: miner1, 2: miner2}
-        
-        # Convert to multi_miner format - each miner tracked by hotkey
-        multi_miner_result = {
-            "hotkey_1": multi_step_dialogue_utterances,
-            "hotkey_2": multi_step_dialogue_utterances
-        }
-        
-        captured_rows = []
-        
-        async def mock_insert_submissions(rows):
-            captured_rows.extend(rows)
-        
-        with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
-             patch('babelbit.cli.runner.get_current_challenge_uid', new_callable=AsyncMock, return_value="challenge-multi-miner"), \
-             patch('babelbit.cli.runner.get_miners_from_registry', new_callable=AsyncMock, return_value=miners), \
-             patch('babelbit.cli.runner.predict_with_utterance_engine_multi_miner', new_callable=AsyncMock, return_value=multi_miner_result), \
-             patch('babelbit.cli.runner.close_http_clients'), \
-             patch('babelbit.cli.runner.init_utterance_auth'), \
-             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock), \
-             patch('babelbit.cli.runner.db_pool') as mock_db_pool, \
-             patch('babelbit.cli.runner.insert_scoring_staging', new_callable=AsyncMock, return_value=12345), \
-             patch('babelbit.cli.runner.insert_scoring_submissions_bulk', new_callable=AsyncMock, side_effect=mock_insert_submissions):
-            
-            # Mock DB as ready - need to mock both init and is_ready
-            mock_db_pool.init = AsyncMock()
-            mock_db_pool.is_ready.return_value = True
-            
-            # Run the function with DB writes enabled
-            with patch.dict('os.environ', {
-                'BB_OUTPUT_LOGS_DIR': temp_test_dir['logs'],
-                'BB_ENABLE_DB_WRITES': '1'
-            }):
-                await runner(output_dir=temp_test_dir['scores'])
-            
-            # Verify we have rows for both miners
-            miner_1_rows = [r for r in captured_rows if r.get('miner_uid') == 1]
-            miner_2_rows = [r for r in captured_rows if r.get('miner_uid') == 2]
-            
-            assert len(miner_1_rows) > 0, "No rows found for miner 1"
-            assert len(miner_2_rows) > 0, "No rows found for miner 2"
-            
-            # Print comparison of both miners
-            print("\n" + "=" * 80)
-            print(f"Multi-Miner Database Test: {len(captured_rows)} total rows")
-            print("=" * 80)
-            print(f"\nMiner 1 rows: {len(miner_1_rows)}")
-            print(f"Miner 2 rows:  {len(miner_2_rows)}")
-            print("\n" + "-" * 80)
-            print(f"{'Miner UID':<12}{'Hotkey':<30}{'Utt #':<8}{'U_best':<10}{'Step Count':<12}")
-            print("-" * 80)
-            
-            # Show sample rows from each miner
-            for row in miner_1_rows[:2]:
-                print(f"{row.get('miner_uid'):<12}{row.get('miner_hotkey')[:28]:<30}"
-                      f"{row.get('utterance_number', 'N/A'):<8}{row.get('average_u_best_early', 0.0):<10.4f}"
-                      f"{row.get('total_steps', 'N/A'):<12}")
-            
-            for row in miner_2_rows[:2]:
-                print(f"{row.get('miner_uid'):<12}{row.get('miner_hotkey')[:28]:<30}"
-                      f"{row.get('utterance_number', 'N/A'):<8}{row.get('average_u_best_early', 0.0):<10.4f}"
-                      f"{row.get('total_steps', 'N/A'):<12}")
-            
-            print("=" * 80 + "\n")
-            
-            # Verify each miner has correct hotkey
-            for row in miner_1_rows:
-                assert row['miner_hotkey'] == "hotkey_1"
-            
-            for row in miner_2_rows:
-                assert row['miner_hotkey'] == "hotkey_2"
 
 
 if __name__ == "__main__":
