@@ -124,32 +124,11 @@ EOF
 
 # Validators
 
-## Postgres Database
-
-Validators will need to create their own Postgres database to persist miner scores. 
-
-You can run the following command to create the schemas in your database:
-
-```bash
-psql -h YOUR_PG_HOST -p YOUR_PG_PORT -U YOUR_PG_USER -d YOUR_PG_DB -f sql/init.sql
-```
-
-### Update your .env file
-```bash
-cat >> .env << 'EOF'
-PG_HOST=your-pg-host
-PG_PORT=your-pg-port
-PG_DB=your-pg-db-name
-PG_USER=your-pg-user 
-PG_PASSWORD=your-pg-password
-EOF
-```
-
 ## S3 Bucket (optional)
 
 Logs created by the validator can be stored in a S3 bucket for later use. This step is optional and won't affect the output of the validator.
 
-### Update your .env file
+### Update your .env file if using S3
 ```bash
 cat >> .env << 'EOF'
 BB_ENABLE_S3_UPLOADS=1
@@ -180,8 +159,6 @@ sv -vv validate
 sv -vv runner
 sv -vv signer
 ```
-
-
 
 # Miners
 
