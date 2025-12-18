@@ -110,12 +110,14 @@ def signer_cmd():
 )
 def validate_cmd(tail: int, alpha: float, m_min: int, tempo: int):
     """
-    ScoreVision validator (mainnet cadence):
+    Babelbit validator (mainnet cadence):
       - attend block%tempo==0
       - calcule (uids, weights) winner-takes-all
       - push via signer, fallback local si signer HS
     """
     _start_metrics()
+    # Overriding to keep validators in sync
+    tempo = 100
     asyncio.run(_validate_main(tail=tail, alpha=alpha, m_min=m_min, tempo=tempo))
 
 

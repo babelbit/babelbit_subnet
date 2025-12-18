@@ -102,7 +102,8 @@ def create_challenge_summary_data(
     dialogue_scores: List[float],
     dialogue_uids: List[str],
     run_file_path: Optional[str] = None,
-    challenge_file_path: Optional[str] = None
+    challenge_file_path: Optional[str] = None,
+    challenge_type: str = "main",
 ) -> dict:
     """
     Create challenge summary data structure for the overall challenge results.
@@ -122,6 +123,7 @@ def create_challenge_summary_data(
         "run_file": run_file_path,
         "challenge_file": challenge_file_path,
         "challenge_uid": challenge_uid,
+        "challenge_type": challenge_type,
         "miner_uid": miner.uid,
         "miner_hotkey": miner.hotkey,
         "dialogues": dialogues,

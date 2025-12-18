@@ -6,7 +6,7 @@ Tests that the validator properly captures the first token from /start endpoint.
 """
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
-from babelbit.utils.predict_utterances import predict_with_utterance_engine
+from babelbit.utils.predict_utterances import predict_with_utterance_engine_multi_miner
 
 
 @pytest.mark.asyncio
@@ -58,43 +58,36 @@ async def test_single_token_captures_first_token():
     mock_session.get = mock_get
     mock_session.post = mock_post
     
-    # Mock chute prediction - Import inside to avoid import errors
-    async def mock_chute(*args, **kwargs):
-        from babelbit.chute_template.schemas import BBPredictedUtterance
-        from babelbit.utils.predict_engine import call_miner_model_on_chutes
-        
-        # Create minimal result structure
-        result = MagicMock()
-        result.success = True
-        result.error = None
-        result.utterance = BBPredictedUtterance(
-            index="test-123",
-            step=0,
-            prefix="Hello",
-            prediction="test",
-            context=""
-        )
-        return result
-    
+    class Miner:
+        def __init__(self, hotkey: str):
+            self.hotkey = hotkey
+            self.slug = hotkey
+
+    miner = Miner("miner-1")
+
+    async def mock_predict(miner_obj, payload, context):
+        return "test"
+
     with patch('babelbit.utils.predict_utterances.get_async_client', new_callable=AsyncMock) as mock_client, \
-         patch('babelbit.utils.predict_utterances.get_auth_headers', new_callable=AsyncMock) as mock_headers, \
-         patch('babelbit.utils.predict_engine.call_miner_model_on_chutes', new_callable=AsyncMock) as mock_chute_call:
+         patch('babelbit.utils.predict_utterances.get_auth_headers', new_callable=AsyncMock) as mock_headers:
         
         mock_client.return_value = mock_session
         mock_headers.return_value = {}
-        mock_chute_call.side_effect = mock_chute
         
         # Run prediction
-        dialogues = await predict_with_utterance_engine(
+        dialogues = await predict_with_utterance_engine_multi_miner(
             utterance_engine_url="http://test:8000",
-            chute_slug="test-chute"
+            miners=[miner],
+            prediction_callback=mock_predict,
         )
         
         # Verify
-        assert "dlg-001" in dialogues, "Dialogue should be present"
-        assert len(dialogues["dlg-001"]) > 0, "Should have utterance steps"
+        assert miner.hotkey in dialogues, "Miner dialogues should be present"
+        miner_dialogues = dialogues[miner.hotkey]
+        assert "dlg-001" in miner_dialogues, "Dialogue should be present"
+        assert len(miner_dialogues["dlg-001"]) > 0, "Should have utterance steps"
         
-        last_step = dialogues["dlg-001"][-1]
+        last_step = miner_dialogues["dlg-001"][-1]
         assert last_step.ground_truth == "Hello", \
             f"Expected ground_truth='Hello', got '{last_step.ground_truth}'"
 
@@ -145,39 +138,35 @@ async def test_multi_token_includes_first_token():
     mock_session = MagicMock()
     mock_session.get = mock_get
     mock_session.post = mock_post
-    
-    async def mock_chute(*args, **kwargs):
-        from babelbit.chute_template.schemas import BBPredictedUtterance
-        
-        result = MagicMock()
-        result.success = True
-        result.error = None
-        result.utterance = BBPredictedUtterance(
-            index="test-456",
-            step=0,
-            prefix="",
-            prediction="test",
-            context=""
-        )
-        return result
-    
+
+    class Miner:
+        def __init__(self, hotkey: str):
+            self.hotkey = hotkey
+            self.slug = hotkey
+
+    miner = Miner("miner-2")
+
+    async def mock_predict(miner_obj, payload, context):
+        return "test"
+
     with patch('babelbit.utils.predict_utterances.get_async_client', new_callable=AsyncMock) as mock_client, \
-         patch('babelbit.utils.predict_utterances.get_auth_headers', new_callable=AsyncMock) as mock_headers, \
-         patch('babelbit.utils.predict_engine.call_miner_model_on_chutes', new_callable=AsyncMock) as mock_chute_call:
+         patch('babelbit.utils.predict_utterances.get_auth_headers', new_callable=AsyncMock) as mock_headers:
         
         mock_client.return_value = mock_session
         mock_headers.return_value = {}
-        mock_chute_call.side_effect = mock_chute
         
-        dialogues = await predict_with_utterance_engine(
+        dialogues = await predict_with_utterance_engine_multi_miner(
             utterance_engine_url="http://test:8000",
-            chute_slug="test-chute"
+            miners=[miner],
+            prediction_callback=mock_predict,
         )
         
-        assert "dlg-002" in dialogues
-        assert len(dialogues["dlg-002"]) > 0
+        assert miner.hotkey in dialogues
+        miner_dialogues = dialogues[miner.hotkey]
+        assert "dlg-002" in miner_dialogues
+        assert len(miner_dialogues["dlg-002"]) > 0
         
-        last_step = dialogues["dlg-002"][-1]
+        last_step = miner_dialogues["dlg-002"][-1]
         assert last_step.ground_truth == "Hello world", \
             f"Expected 'Hello world', got '{last_step.ground_truth}'"
 

@@ -65,12 +65,13 @@ class ValidationSubmissionClient:
         file_path: Path,
         file_type: str,
         challenge_id: str,
+        main_challenge_uid: str,
         miner_uid: Optional[int],
         miner_hotkey: Optional[str],
         dialogue_uid: Optional[str] = None,
         s3_path: Optional[str] = None,
         extra_data: Optional[Dict[str, Any]] = None,
-        kind: Optional[str] = None,
+        kind: Optional[str] = None
     ) -> bool:
         """Read the file, sign the payload, and POST to the validation API."""
         if not self.is_ready:
@@ -80,6 +81,7 @@ class ValidationSubmissionClient:
             "file_type": file_type,
             "file_name": file_path.name,
             "challenge_uid": challenge_id,
+            "main_challenge_uid": main_challenge_uid,
             "miner_uid": miner_uid,
             "miner_hotkey": miner_hotkey,
             "dialogue_uid": dialogue_uid,

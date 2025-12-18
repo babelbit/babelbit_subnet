@@ -41,6 +41,7 @@ async def test_submit_validation_file_success(tmp_path, monkeypatch):
             file_type="dialogue_log",
             kind="dialogue_logs",
             challenge_id="ch-123",
+            main_challenge_uid="ch-123",
             miner_uid=1,
             miner_hotkey="hk",
             dialogue_uid="dlg-1",
@@ -55,6 +56,7 @@ async def test_submit_validation_file_success(tmp_path, monkeypatch):
         assert called_kwargs["json"]["data"]["file_size"] == test_file.stat().st_size
         assert called_kwargs["json"]["signature"] == b"sigbytes".hex()
         assert called_kwargs["json"]["challenge_id"] == "ch-123"
+        assert called_kwargs["json"]["data"]["main_challenge_uid"] == "ch-123"
         assert called_kwargs["json"]["data"]["foo"] == "bar"
         assert called_kwargs["json"]["kind"] == "dialogue_logs"
 
@@ -78,6 +80,7 @@ async def test_submit_validation_file_rejected(monkeypatch):
             file_type="dialogue_log",
             kind=None,
             challenge_id="ch-123",
+            main_challenge_uid="ch-123",
             miner_uid=None,
             miner_hotkey=None,
         )
@@ -106,6 +109,7 @@ async def test_disabled_client_skips_submission(monkeypatch):
             file_type="dialogue_log",
             kind=None,
             challenge_id="ch-123",
+            main_challenge_uid="ch-123",
             miner_uid=None,
             miner_hotkey=None,
         )

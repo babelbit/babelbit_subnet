@@ -1,12 +1,10 @@
-from typing import List, Optional
+from typing import List, Optional, Dict
 from logging import getLogger
 import os
-import tempfile
 from pathlib import Path
 import json
 import random
 import asyncio
-from datetime import datetime
 import time
 
 from babelbit.utils.s3_manager import S3Manager
@@ -14,7 +12,7 @@ from babelbit.utils.settings import get_settings
 
 from babelbit.utils.predict_utterances import (
     get_current_challenge_uid, 
-    predict_with_utterance_engine_multi_miner
+    predict_with_utterance_engine_multi_miner,
 )
 from babelbit.utils.utterance_auth import init_utterance_auth, authenticate_utterance_engine
 from babelbit.utils.async_clients import close_http_clients
@@ -27,23 +25,11 @@ from babelbit.utils.file_handling import (
     save_dialogue_score_file,
     save_challenge_summary_file,
 )
-from datetime import timezone
-
 from babelbit.utils.challenge_status import mark_challenge_processed
 from babelbit.utils.validation_submission import ValidationSubmissionClient
 
-# Scoring policy: Runner performs per-dialogue scoring using score_dialogue.score_jsonl
-# immediately after writing the raw dialogue JSONL, then persists both dialogue score JSONs
-# and a challenge summary JSON per miner. This keeps downstream evaluation simple while
-# still enabling external rescoring if needed (raw logs retained in logs_dir).
-# Backward-compat: fall back to test_scripts if the scoring package isn't present.
-try:
-    from babelbit.scoring.score_dialogue import score_jsonl  # type: ignore
-except Exception:
-    try:
-        from babelbit.test_scripts.score_dialogue import score_jsonl  # type: ignore
-    except Exception:
-        score_jsonl = None  # Will log warning when attempting to score
+
+from babelbit.scoring.score_dialogue import score_jsonl
 
 logger = getLogger(__name__)
 
@@ -74,11 +60,240 @@ def group_steps_into_utterances(utterance_steps: List[BBPredictedUtterance]) -> 
     return complete_utterances
 
 
+async def _score_miners_for_challenge(
+    *,
+    challenge_uid: Optional[str],
+    challenge_type: str,
+    miner_list: List[Miner],
+    miner_dialogues: Dict[str, Dict[str, List[BBPredictedUtterance]]],
+    logs_dir: Path,
+    scores_dir: Path,
+    submission_client: ValidationSubmissionClient,
+    active_s3_manager: Optional[S3Manager],
+    main_challenge_uid: Optional[str] = None,
+) -> tuple[int, int, List[float]]:
+    """Persist dialogue logs, score miners, and return aggregate stats."""
+    total_miners_processed = 0
+    total_dialogues_processed = 0
+    main_challenge_uid = main_challenge_uid or challenge_uid
+    all_challenge_scores: List[float] = []
+
+    for m in miner_list:
+        try:
+            miner_key = m.hotkey
+            miner_id = m.slug or f"uid_{m.uid}"
+
+            dialogues = miner_dialogues.get(miner_key, {})
+            if not dialogues and getattr(m, "slug", None):
+                fallback_key = m.slug
+                dialogues = miner_dialogues.get(fallback_key, {})
+                if dialogues:
+                    logger.debug("[runner] miner %s: using slug key fallback for dialogues", miner_id)
+            logger.debug(
+                "[runner] miner uid=%s hk=%s dialogues_count=%d",
+                getattr(m, "uid", "?"),
+                (m.hotkey[:16] + "..."),
+                len(dialogues or {}),
+            )
+
+            if not dialogues:
+                logger.warning(f"Miner {miner_id} (uid: {m.uid}, hotkey: {m.hotkey[:16]}...) has no dialogues to score")
+                continue
+
+            has_valid_predictions = False
+            for dialogue_uid, utterance_steps in dialogues.items():
+                for step in utterance_steps:
+                    prediction = getattr(step, "prediction", "") or ""
+                    if prediction.strip():
+                        has_valid_predictions = True
+                        break
+                if has_valid_predictions:
+                    break
+
+            if not has_valid_predictions:
+                logger.warning(f"Miner {miner_id} (uid: {m.uid}) has no valid predictions across {len(dialogues)} dialogues - skipping scoring")
+                logger.debug("[runner] miner %s invalid/empty predictions; skipping", miner_id)
+                continue
+
+            logger.info(f"Processing {len(dialogues)} dialogues for miner {miner_id} (uid: {m.uid}, hotkey: {m.hotkey[:16]}...)")
+
+            dialogue_scores: List[float] = []
+            dialogue_uids: List[str] = []
+
+            for dialogue_uid, utterance_steps in dialogues.items():
+                dialogue_uids.append(dialogue_uid)
+                logger.info(f"Miner {miner_id} produced {len(utterance_steps)} utterance steps in dialogue {dialogue_uid}")
+                complete_utterances = group_steps_into_utterances(utterance_steps)
+                logger.info(f"Dialogue {dialogue_uid} contains {len(complete_utterances)} complete utterances")
+                events_path = logs_dir / f"dialogue_run_{challenge_uid or 'unknown'}_miner_{m.uid}__hk_{m.hotkey}__dlg_{dialogue_uid}.jsonl"
+                with events_path.open("w", encoding="utf-8") as jf:
+                    for utt_index, utt_steps in enumerate(complete_utterances):
+                        gt = getattr(utt_steps[-1], "ground_truth", "") or ""
+                        if not gt.strip():
+                            logger.warning(
+                                f"Skipping utterance {utt_index} in dialogue {dialogue_uid} for miner {miner_id} - "
+                                f"empty ground_truth (likely timeout or early session termination)"
+                            )
+                            logger.debug(
+                                "[runner] skipped utt_index=%d (empty GT) in dialogue=%s miner=%s",
+                                utt_index,
+                                dialogue_uid,
+                                miner_id,
+                            )
+                            continue
+
+                        for step_idx, step_obj in enumerate(utt_steps):
+                            jf.write(json.dumps({
+                                "event": "predicted",
+                                "utterance_index": utt_index,
+                                "step": step_idx,
+                                "prediction": getattr(step_obj, "prediction", "") or "",
+                            }) + "\n")
+
+                        jf.write(json.dumps({
+                            "event": "utterance_complete",
+                            "utterance_index": utt_index,
+                            "ground_truth": gt,
+                        }) + "\n")
+                logger.info(f"[runner] Wrote raw dialogue log: {events_path}")
+                logger.debug("[runner] events_path size=%d bytes", events_path.stat().st_size if events_path.exists() else -1)
+
+                s3_log_path = None
+                if active_s3_manager:
+                    s3_log_path = f"{settings.S3_LOG_DIR}/logs/{events_path.name}"
+                    active_s3_manager.upload_file(str(events_path), s3_log_path)
+                    logger.info(f"Uploaded raw dialogue log to S3: s3://{active_s3_manager.bucket_name}/{s3_log_path}")
+                if submission_client.is_ready:
+                    try:
+                        await submission_client.submit_validation_file(
+                            file_path=events_path,
+                            file_type="dialogue_run",
+                            kind="dialogue_logs",
+                            challenge_id=challenge_uid or "",
+                            main_challenge_uid=main_challenge_uid,
+                            miner_uid=getattr(m, "uid", None),
+                            miner_hotkey=getattr(m, "hotkey", None),
+                            dialogue_uid=dialogue_uid,
+                            s3_path=s3_log_path,
+                        )
+                    except Exception as e:
+                        logger.warning("Validation submission error for %s: %s", events_path.name, e)
+
+                if score_jsonl is None:
+                    logger.warning("score_jsonl unavailable; skipping scoring for dialogue %s", dialogue_uid)
+                    continue
+                try:
+                    scored_doc = score_jsonl(events_path)
+                    logger.debug(
+                        "[runner] score_jsonl produced %d utterances for dialogue %s",
+                        len(scored_doc.get("utterances", [])),
+                        dialogue_uid,
+                    )
+                    scored_doc.update({
+                        "challenge_uid": challenge_uid,
+                        "challenge_type": challenge_type,
+                        "miner_uid": getattr(m, "uid", None),
+                        "miner_hotkey": getattr(m, "hotkey", None),
+                        "dialogue_uid": dialogue_uid,
+                    })
+                    avg_u = float(scored_doc.get("dialogue_summary", {}).get("average_U_best_early", 0.0))
+                    dialogue_scores.append(avg_u)
+                    score_path = save_dialogue_score_file(scored_doc, output_dir=str(scores_dir))
+                    logger.info(f"[runner] Scored dialogue {dialogue_uid} U={avg_u:.4f}")
+
+                    s3_sub_path = None
+                    if active_s3_manager:
+                        s3_sub_path = f"submissions/{Path(score_path).name}"
+                        active_s3_manager.upload_file(str(score_path), s3_sub_path)
+                        logger.info(f"Uploaded dialogue score to S3: s3://{active_s3_manager.bucket_name}/{s3_sub_path}")
+                    if submission_client.is_ready:
+                        try:
+                            await submission_client.submit_validation_file(
+                                file_path=Path(score_path),
+                                file_type="dialogue_scores",
+                                kind="dialogue_scores",
+                                challenge_id=challenge_uid or "",
+                                main_challenge_uid=main_challenge_uid,
+                                miner_uid=getattr(m, "uid", None),
+                                miner_hotkey=getattr(m, "hotkey", None),
+                                dialogue_uid=dialogue_uid,
+                                s3_path=s3_sub_path,
+                            )
+                        except Exception as e:
+                            logger.warning("Validation submission error for %s: %s", score_path, e)
+                except Exception as e:
+                    logger.warning("Failed scoring dialogue %s: %s", dialogue_uid, e)
+
+            if dialogue_scores and dialogue_uids:
+                try:
+                    miner_mean_score = sum(dialogue_scores) / len(dialogue_scores)
+                    summary = {
+                        "challenge_uid": challenge_uid,
+                        "challenge_type": challenge_type,
+                        "miner_uid": getattr(m, "uid", None),
+                        "miner_hotkey": getattr(m, "hotkey", None),
+                        "dialogues": [
+                            {"dialogue_uid": duid, "dialogue_average_u_best_early": ds, "dialogue_index": idx}
+                            for idx, (duid, ds) in enumerate(zip(dialogue_uids, dialogue_scores))
+                        ],
+                        "challenge_mean_U": miner_mean_score,
+                    }
+                    summary_path = save_challenge_summary_file(summary, output_dir=str(scores_dir))
+                    logger.debug(
+                        "[runner] saved challenge summary for miner %s: path=%s dialogues=%d mean=%.4f",
+                        miner_id,
+                        str(summary_path),
+                        len(dialogue_scores),
+                        miner_mean_score,
+                    )
+
+                    total_miners_processed += 1
+                    total_dialogues_processed += len(dialogue_scores)
+                    all_challenge_scores.append(miner_mean_score)
+
+                    s3_sub_path = None
+                    if active_s3_manager:
+                        s3_sub_path = f"submissions/{Path(summary_path).name}"
+                        active_s3_manager.upload_file(str(summary_path), s3_sub_path)
+                        logger.info(f"Uploaded challenge summary to S3: s3://{active_s3_manager.bucket_name}/{s3_sub_path}")
+                    if submission_client.is_ready:
+                        try:
+                            await submission_client.submit_validation_file(
+                                file_path=Path(summary_path),
+                                file_type="challenge_scores",
+                                kind="challenge_scores",
+                                challenge_id=challenge_uid or "",
+                                main_challenge_uid=main_challenge_uid,
+                                miner_uid=getattr(m, "uid", None),
+                                miner_hotkey=getattr(m, "hotkey", None),
+                                dialogue_uid=None,
+                                s3_path=s3_sub_path,
+                            )
+                        except Exception as e:
+                            logger.warning("Validation submission error for %s: %s", summary_path, e)
+                except Exception as e:
+                    logger.warning("Failed to save challenge summary for miner %s: %s", getattr(m, "uid", "?"), e)
+            else:
+                logger.debug("[runner] no dialogue scores for miner %s", miner_id)
+
+        except Exception as e:
+            logger.warning(
+                "Failed to process miner uid=%s slug=%s: %s",
+                getattr(m, "uid", "?"),
+                getattr(m, "slug", "?"),
+                e,
+            )
+            continue
+
+    return total_miners_processed, total_dialogues_processed, all_challenge_scores
+
+
 async def runner(slug: str | None = None, utterance_engine_url: str | None = None, output_dir: Optional[str] = None, subtensor=None) -> None:
     settings = get_settings()
     NETUID = settings.BABELBIT_NETUID
     MAX_MINERS = int(os.getenv("BB_MAX_MINERS_PER_RUN", "256"))
     utterance_engine_url = utterance_engine_url or os.getenv("BB_UTTERANCE_ENGINE_URL", "http://localhost:8000")
+    enable_solo_challenge = os.getenv("BB_ENABLE_SOLO_CHALLENGE", "1").lower() in {"1", "true", "yes"}
     
     # Determine directories:
     #   Raw logs:   ./logs (override with BB_OUTPUT_LOGS_DIR)
@@ -238,220 +453,100 @@ async def runner(slug: str | None = None, utterance_engine_url: str | None = Non
         except Exception:
             pass
         
-        # Track statistics for challenge status
-        total_miners_processed = 0
-        total_dialogues_processed = 0
-        all_challenge_scores: List[float] = []
-        
-        # Now score each miner's dialogues
-        for m in miner_list:
+        total_miners_processed, total_dialogues_processed, all_challenge_scores = await _score_miners_for_challenge(
+            challenge_uid=challenge_uid,
+            challenge_type="main",
+            miner_list=miner_list,
+            miner_dialogues=miner_dialogues or {},
+            logs_dir=logs_dir,
+            scores_dir=scores_dir,
+            submission_client=submission_client,
+            active_s3_manager=s3_manager,
+        )
+
+        if enable_solo_challenge:
             try:
-                # Use hotkey as the key (matches what predict_utterances uses)
-                miner_key = m.hotkey
-                miner_id = m.slug or f"uid_{m.uid}"
-                    
-                dialogues = miner_dialogues.get(miner_key, {})
-                # Backward compatibility: some callers/tests key by slug
-                if not dialogues and getattr(m, "slug", None):
-                    fallback_key = m.slug
-                    dialogues = miner_dialogues.get(fallback_key, {})
-                    if dialogues:
-                        logger.debug("[runner] miner %s: using slug key fallback for dialogues", miner_id)
-                logger.debug(
-                    "[runner] miner uid=%s hk=%s dialogues_count=%d",
-                    getattr(m, 'uid', '?'), (m.hotkey[:16] + '...'), len(dialogues or {}),
+                solo_dialogues, solo_uid, solo_status = await predict_with_utterance_engine_multi_miner(
+                    utterance_engine_url=utterance_engine_url,
+                    miners=miner_list,
+                    prediction_callback=prediction_callback,
+                    timeout=chutes_timeout,
+                    max_prediction_errors=5,
+                    subtensor=None,
+                    step_block_modulo=0,
+                    solo=True,
+                    miner_key_fn=lambda miner: getattr(miner, "hotkey", None)
+                    or getattr(miner, "slug", None)
+                    or f"uid_{getattr(miner, 'uid', '?')}",
+                    return_challenge_uid=True,
+                    return_miner_status=True,
                 )
-                
-                if not dialogues:
-                    logger.warning(f"Miner {miner_id} (uid: {m.uid}, hotkey: {m.hotkey[:16]}...) has no dialogues to score")
-                    continue
-                
-                # Check if miner has any valid predictions before scoring
-                has_valid_predictions = False
-                for dialogue_uid, utterance_steps in dialogues.items():
-                    for step in utterance_steps:
-                        prediction = getattr(step, 'prediction', '') or ''
-                        if prediction.strip():  # Non-empty prediction
-                            has_valid_predictions = True
-                            break
-                    if has_valid_predictions:
-                        break
-                
-                if not has_valid_predictions:
-                    logger.warning(f"Miner {miner_id} (uid: {m.uid}) has no valid predictions across {len(dialogues)} dialogues - skipping scoring")
-                    logger.debug("[runner] miner %s invalid/empty predictions; skipping", miner_id)
-                    continue
-                
-                logger.info(f"Processing {len(dialogues)} dialogues for miner {miner_id} (uid: {m.uid}, hotkey: {m.hotkey[:16]}...)")
-                
-                dialogue_scores: List[float] = []
-                dialogue_uids: List[str] = []
-
-                # Emit raw JSONL events per dialogue then score
-                for dialogue_uid, utterance_steps in dialogues.items():
-                    dialogue_uids.append(dialogue_uid)
-                    logger.info(f"Miner {miner_id} produced {len(utterance_steps)} utterance steps in dialogue {dialogue_uid}")
-                    complete_utterances = group_steps_into_utterances(utterance_steps)
-                    logger.info(f"Dialogue {dialogue_uid} contains {len(complete_utterances)} complete utterances")
-                    events_path = logs_dir / f"dialogue_run_{challenge_uid or 'unknown'}_miner_{m.uid}__hk_{m.hotkey}__dlg_{dialogue_uid}.jsonl"
-                    with events_path.open("w", encoding="utf-8") as jf:
-                        for utt_index, utt_steps in enumerate(complete_utterances):
-                            # Validate ground truth before writing events
-                            gt = getattr(utt_steps[-1], 'ground_truth', '') or ''
-                            
-                            # Skip utterances with empty ground truth (timeout/early termination)
-                            if not gt.strip():
-                                logger.warning(
-                                    f"Skipping utterance {utt_index} in dialogue {dialogue_uid} for miner {miner_id} - "
-                                    f"empty ground_truth (likely timeout or early session termination)"
-                                )
-                                logger.debug(
-                                    "[runner] skipped utt_index=%d (empty GT) in dialogue=%s miner=%s",
-                                    utt_index, dialogue_uid, miner_id,
-                                )
-                                continue
-                            
-                            # Write prediction steps
-                            for step_idx, step_obj in enumerate(utt_steps):
-                                jf.write(json.dumps({
-                                    "event": "predicted",
-                                    "utterance_index": utt_index,
-                                    "step": step_idx,
-                                    "prediction": getattr(step_obj, 'prediction', '') or ''
-                                }) + "\n")
-                            
-                            # Write utterance completion with validated ground truth
-                            jf.write(json.dumps({
-                                "event": "utterance_complete",
-                                "utterance_index": utt_index,
-                                "ground_truth": gt
-                            }) + "\n")
-                    logger.info(f"[runner] Wrote raw dialogue log: {events_path}")
-                    logger.debug("[runner] events_path size=%d bytes", events_path.stat().st_size if events_path.exists() else -1)
-                    # Optionally, write raw events JSON to S3
-                    if s3_manager:
-                        # Upload to bucket/logs/ directory structure
-                        s3_log_path = f"{settings.S3_LOG_DIR}/logs/{events_path.name}"
-                        s3_manager.upload_file(str(events_path), s3_log_path)
-                        logger.info(f"Uploaded raw dialogue log to S3: s3://{s3_manager.bucket_name}/{s3_log_path}")
-                    if submission_client.is_ready:
-                        try:
-                            await submission_client.submit_validation_file(
-                                file_path=events_path,
-                                file_type="dialogue_run",
-                                kind="dialogue_logs",
-                                challenge_id=challenge_uid or "",
-                                miner_uid=getattr(m, "uid", None),
-                                miner_hotkey=getattr(m, "hotkey", None),
-                                dialogue_uid=dialogue_uid,
-                                s3_path=s3_log_path if s3_manager else None,
-                            )
-                        except Exception as e:
-                            logger.warning("Validation submission error for %s: %s", events_path.name, e)
-
-                    if score_jsonl is None:
-                        logger.warning("score_jsonl unavailable; skipping scoring for dialogue %s", dialogue_uid)
-                        continue
-                    try:
-                        scored_doc = score_jsonl(events_path)
-                        logger.debug(
-                            "[runner] score_jsonl produced %d utterances for dialogue %s",
-                            len(scored_doc.get("utterances", [])), dialogue_uid,
-                        )
-                        # augment metadata
-                        scored_doc.update({
-                            "challenge_uid": challenge_uid,
-                            "miner_uid": getattr(m, 'uid', None),
-                            "miner_hotkey": getattr(m, 'hotkey', None),
-                            "dialogue_uid": dialogue_uid,
-                        })
-                        avg_u = float(scored_doc.get("dialogue_summary", {}).get("average_U_best_early", 0.0))
-                        dialogue_scores.append(avg_u)
-                        score_path = save_dialogue_score_file(scored_doc, output_dir=str(scores_dir))
-                        logger.info(f"[runner] Scored dialogue {dialogue_uid} U={avg_u:.4f}")
-                        if s3_manager:
-                            # Upload to bucket/submissions/ directory structure
-                            s3_sub_path = f"submissions/{Path(score_path).name}"
-                            s3_manager.upload_file(str(score_path), s3_sub_path)
-                            logger.info(f"Uploaded dialogue score to S3: s3://{s3_manager.bucket_name}/{s3_sub_path}")
-                        if submission_client.is_ready:
-                            try:
-                                await submission_client.submit_validation_file(
-                                    file_path=Path(score_path),
-                                    file_type="dialogue_scores",
-                                    kind="dialogue_scores",
-                                    challenge_id=challenge_uid or "",
-                                    miner_uid=getattr(m, "uid", None),
-                                    miner_hotkey=getattr(m, "hotkey", None),
-                                    dialogue_uid=dialogue_uid,
-                                    s3_path=s3_sub_path if s3_manager else None,
-                                )
-                            except Exception as e:
-                                logger.warning("Validation submission error for %s: %s", score_path, e)
-
-                    except Exception as e:
-                        logger.warning("Failed scoring dialogue %s: %s", dialogue_uid, e)
-
-                # Miner-level challenge summary
-                if dialogue_scores and dialogue_uids:
-                    try:
-                        miner_mean_score = sum(dialogue_scores) / len(dialogue_scores)
-                        summary = {
-                            "challenge_uid": challenge_uid,
-                            "miner_uid": getattr(m, 'uid', None),
-                            "miner_hotkey": getattr(m, 'hotkey', None),
-                            "dialogues": [
-                                {"dialogue_uid": duid, "dialogue_average_u_best_early": ds, "dialogue_index": idx}
-                                for idx, (duid, ds) in enumerate(zip(dialogue_uids, dialogue_scores))
-                            ],
-                            "challenge_mean_U": miner_mean_score,
-                        }
-                        summary_path = save_challenge_summary_file(summary, output_dir=str(scores_dir))
-                        logger.debug(
-                            "[runner] saved challenge summary for miner %s: path=%s dialogues=%d mean=%.4f",
-                            miner_id, str(summary_path), len(dialogue_scores), miner_mean_score,
-                        )
-                        
-                        # Track statistics for challenge status
-                        total_miners_processed += 1
-                        total_dialogues_processed += len(dialogue_scores)
-                        all_challenge_scores.append(miner_mean_score)
-                        
-                        if s3_manager:
-                            # Upload to bucket/submissions/ directory structure
-                            s3_sub_path = f"submissions/{Path(summary_path).name}"
-                            s3_manager.upload_file(str(summary_path), s3_sub_path)
-                            logger.info(f"Uploaded challenge summary to S3: s3://{s3_manager.bucket_name}/{s3_sub_path}")
-                        if submission_client.is_ready:
-                            try:
-                                await submission_client.submit_validation_file(
-                                    file_path=Path(summary_path),
-                                    file_type="challenge_scores",
-                                    kind="challenge_scores",
-                                    challenge_id=challenge_uid or "",
-                                    miner_uid=getattr(m, "uid", None),
-                                    miner_hotkey=getattr(m, "hotkey", None),
-                                    dialogue_uid=None,
-                                    s3_path=s3_sub_path if s3_manager else None,
-                                )
-                            except Exception as e:
-                                logger.warning("Validation submission error for %s: %s", summary_path, e)
-
-                    except Exception as e:
-                        logger.warning("Failed to save challenge summary for miner %s: %s", getattr(m,'uid', '?'), e)
-                else:
-                    logger.debug("[runner] no dialogue scores for miner %s", miner_id)
-
+                solo_results = {
+                    miner_key: {"challenge_uid": solo_uid, "dialogues": dialogues}
+                    for miner_key, dialogues in (solo_dialogues or {}).items()
+                    if solo_status.get(miner_key, True)
+                }
             except Exception as e:
-                logger.warning(
-                    "Failed to process miner uid=%s slug=%s: %s",
-                    getattr(m, "uid", "?"),
-                    getattr(m, "slug", "?"),
-                    e,
-                )
-                continue
-        
-        # Mark challenge as processed after all miners are evaluated
+                logger.warning("[Solo Challenge] Failed to run solo challenge: %s", e)
+                solo_results = {}
+
+            if solo_results:
+                solo_total_miners = 0
+                solo_total_dialogues = 0
+
+                for miner in miner_list:
+                    miner_key = getattr(miner, "hotkey", None) or getattr(miner, "slug", None)
+                    if not miner_key or miner_key not in solo_results:
+                        continue
+                    result = solo_results[miner_key]
+                    solo_uid = result.get("challenge_uid")
+                    miner_dialogues = result.get("dialogues") or {}
+
+                    if not solo_uid:
+                        logger.warning("[Solo Challenge] Miner %s returned no challenge UID; skipping scoring", miner_key)
+                        continue
+
+                    m_processed, d_processed, m_scores = await _score_miners_for_challenge(
+                        challenge_uid=solo_uid,
+                        challenge_type="solo",
+                        miner_list=[miner],
+                        miner_dialogues={miner_key: miner_dialogues},
+                        logs_dir=logs_dir,
+                        scores_dir=scores_dir,
+                        submission_client=submission_client,
+                        active_s3_manager=s3_manager,
+                        main_challenge_uid=challenge_uid,
+                    )
+
+                    solo_total_miners += m_processed
+                    solo_total_dialogues += d_processed
+
+                    if m_processed > 0:
+                        solo_mean = sum(m_scores) / len(m_scores) if m_scores else None
+                        mark_challenge_processed(
+                            challenge_uid=solo_uid,
+                            miner_count=m_processed,
+                            total_dialogues=d_processed,
+                            mean_score=solo_mean,
+                            metadata={
+                                "scores_dir": str(scores_dir),
+                                "logs_dir": str(logs_dir),
+                                "solo_challenge": True,
+                                "paired_challenge_uid": challenge_uid,
+                            },
+                        )
+                        solo_mean_str = f"{solo_mean:.4f}" if solo_mean is not None else "N/A"
+                        logger.info(
+                            f"[Solo Challenge] Completed {solo_uid}: {m_processed} miners, "
+                            f"{d_processed} dialogues, mean_score={solo_mean_str}"
+                        )
+                if solo_total_miners == 0:
+                    logger.info("[Solo Challenge] No miners processed during solo phase")
+            else:
+                logger.info("[Solo Challenge] No solo challenge results returned; skipping solo scoring")
+        else:
+            logger.debug("[runner] Solo challenge phase disabled via BB_ENABLE_SOLO_CHALLENGE")
+
         if challenge_uid and total_miners_processed > 0:
             overall_mean = sum(all_challenge_scores) / len(all_challenge_scores) if all_challenge_scores else None
             mark_challenge_processed(

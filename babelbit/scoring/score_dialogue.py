@@ -6,6 +6,36 @@ import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple, Any
 
+from sentence_transformers import SentenceTransformer, util
+
+# Constants with defaults - can be overridden by environment variables
+EMBEDDER_NAME = os.getenv("EMBEDDER_NAME", "mixedbread-ai/mxbai-embed-large-v1")
+EMBED_DIM = int(os.getenv("EMBED_DIM", "64"))
+
+# Lazy-loaded embedder (initialized on first use)
+_embedder = None
+
+def _get_embedder():
+    """Get or initialize the sentence transformer model."""
+    global _embedder
+    if _embedder is None:
+        _embedder = SentenceTransformer(EMBEDDER_NAME, truncate_dim=EMBED_DIM)
+    return _embedder
+
+class Tee:
+    """Write to both stdout and a file handle."""
+    def __init__(self, file_handle):
+        self.file_handle = file_handle
+        self.stdout = sys.stdout
+    
+    def write(self, s: str):
+        self.stdout.write(s)
+        self.file_handle.write(s)
+        
+    def flush(self):
+        self.stdout.flush()
+        self.file_handle.flush()
+
 # ---------------- utilities ----------------
 
 def _strip_eof(s: str) -> str:
@@ -53,12 +83,18 @@ def _char_similarity(a: str, b: str) -> float:
     ed = _edit_distance(a, b)
     return max(0.0, 1.0 - (ed / mx))
 
-def _token_jaccard(a: str, b: str) -> float:
-    ta = set((a or "").split())
-    tb = set((b or "").split())
-    inter = len(ta & tb)
-    union = len(ta | tb)
-    return (inter / union) if union else 0.0
+def cosine_similarity(a: str, b: str) -> float:
+    a = a or ""
+    b = b or ""
+    mx = max(len(a), len(b))
+    if mx == 0:
+        return 0.0
+    embedder = _get_embedder()
+    # Disable tqdm progress output from sentence-transformers in tight scoring loops
+    ea = embedder.encode(a, convert_to_tensor=True, normalize_embeddings=True, show_progress_bar=False)
+    eb = embedder.encode(b, convert_to_tensor=True, normalize_embeddings=True, show_progress_bar=False)
+    cos = util.cos_sim(ea, eb).item()
+    return cos
 
 # --- begin: score-log (add-only, mirrors STDOUT to a file; no logic changes) ---
 
@@ -161,7 +197,7 @@ def score_jsonl(path: Path, lex_weight: float = 0.5, show_steps: bool = True) ->
         for s in range(total_steps):
             pred = _strip_eof(step_to_pred.get(s, ""))
             lex_s = _char_similarity(pred, gt_full)
-            sem_s = _token_jaccard(pred, gt_full)
+            sem_s = cosine_similarity(pred, gt_full)
             earliness_s = 1.0 / (s + 1)  # first prediction gets weight 1.0
             U_step = ((lex_s * lex_weight) + (sem_s * (1.0 - lex_weight))) * earliness_s
 

@@ -450,24 +450,24 @@ class TestPartialScoringFailures:
             # Test documents the current behavior
 
     def test_scoring_functions_handle_empty_strings(self):
-        """Test that scoring functions return 0.0 for empty comparisons"""
-        from babelbit.test_scripts.score_dialogue import _char_similarity, _token_jaccard
+        """Test that upgraded scoring utilities handle empty comparisons safely"""
+        from babelbit.scoring.score_dialogue import _char_similarity, cosine_similarity
         
         # Empty ground truth with empty prediction should score 0.0
         assert _char_similarity("", "") == 0.0, "Empty strings should score 0.0"
-        assert _token_jaccard("", "") == 0.0, "Empty strings should score 0.0"
         
         # Empty ground truth with prediction should score 0.0
         assert _char_similarity("", "hello world") == 0.0
-        assert _token_jaccard("", "hello world") == 0.0
         
         # Ground truth with empty prediction should score 0.0
         assert _char_similarity("hello world", "") == 0.0
-        assert _token_jaccard("hello world", "") == 0.0
+        
+        # Semantic similarity short-circuits to 0.0 for empty pairs (no model load)
+        assert cosine_similarity("", "") == 0.0
 
     def test_score_jsonl_with_empty_ground_truth(self, tmp_path):
         """Test that score_jsonl gives 0.0 score for empty ground truth"""
-        from babelbit.test_scripts.score_dialogue import score_jsonl
+        from babelbit.scoring.score_dialogue import score_jsonl
         
         jsonl_path = tmp_path / "test_empty_gt.jsonl"
         with jsonl_path.open("w") as f:

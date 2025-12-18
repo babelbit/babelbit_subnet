@@ -8,8 +8,29 @@ x-common: &common
   mem_limit: "8g"
 
 services:
+  model-cache:
+      <<: *common
+      container_name: babelbit-model-cache
+      # One-shot prewarm: download embedding model into a shared cache volume
+      restart: "no"
+      environment:
+        HF_HOME: /opt/hf
+        TRANSFORMERS_CACHE: /opt/hf/transformers
+        SENTENCE_TRANSFORMERS_HOME: /opt/hf/sentence_transformers
+        # Disable hf_transfer fast-download unless the package is installed in the image
+        HF_HUB_ENABLE_HF_TRANSFER: 0
+        EMBEDDER_NAME: ${EMBEDDER_NAME:-mixedbread-ai/mxbai-embed-large-v1}
+      volumes:
+        - hf-cache:/opt/hf
+      command: [
+        "python",
+        "-c",
+        "import os, importlib.util; os.environ.setdefault('HF_HUB_ENABLE_HF_TRANSFER','0'); os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '1' if importlib.util.find_spec('hf_transfer') else '0'; from sentence_transformers import SentenceTransformer; m=os.getenv('EMBEDDER_NAME','mixedbread-ai/mxbai-embed-large-v1'); print('[PREWARM] caching', m, 'with hf_transfer=', os.environ['HF_HUB_ENABLE_HF_TRANSFER']); SentenceTransformer(m); print('[PREWARM] done')"
+      ]
   validator:
     <<: *common
+    mem_reservation: "1g"
+    mem_limit: "1g"
     container_name: babelbit-validator
     environment:
       - BABELBIT_CACHE_DIR=/app/data/blocks
@@ -20,6 +41,7 @@ services:
       - PG_DB=${PG_DB}
       - PG_USER=${PG_USER}
       - PG_PASSWORD=${PG_PASSWORD}
+
     volumes:
       - validator-cache:/app/data/blocks
       - challenge-status:/app/data/challenge_status  # Shared challenge status tracking
@@ -31,13 +53,14 @@ services:
         condition: service_healthy
     command: ["bb", "-v", "validate"]
 
+
   runner:
     <<: *common
     container_name: babelbit-runner
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets:ro  # Mount Bittensor wallets
       - challenge-status:/app/data/challenge_status  # Shared challenge status tracking
-      - hf-cache:/opt/hf:ro
+      - hf-cache:/opt/hf  # Allow writes so HF cache can record missing files/sentinels
     ports:
       - "8002:8000"
     environment:
@@ -59,12 +82,15 @@ services:
 
   signer:
     <<: *common
+    mem_reservation: "1g"
+    mem_limit: "1g"
     container_name: babelbit-signer
     ports:
       - "8080:8080"
     environment:
       SIGNER_HOST: 0.0.0.0
       SIGNER_PORT: 8080
+
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets:ro
     healthcheck:
@@ -74,6 +100,7 @@ services:
       retries: 3
       start_period: 5s
     command: ["bb", "-v", "signer"]
+
 
 volumes:
   # TODO: add scores and logs as volumes

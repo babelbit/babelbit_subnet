@@ -1,0 +1,113 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "score_dialogue output (JSON replacement)",
+  "type": "object",
+  "required": ["log_file", "dialogue_uid", "utterances", "dialogue_summary"],
+  "properties": {
+    "log_file": {
+      "type": "string",
+      "description": "Path and filename of the per-step log used for scoring"
+    },
+    "dialogue_uid": {
+      "type": ["string", "null"],
+      "description": "Stable UID for the dialogue (null until implemented)"
+    },
+    "utterances": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "utterance_number",
+          "ground_truth",
+          "steps",
+          "best_step",
+          "U_best",
+          "total_steps"
+        ],
+        "properties": {
+          "utterance_number": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Zero-based index (matches [utt N] in current text output)"
+          },
+          "ground_truth": {
+            "type": "string",
+            "description": "Target/true utterance"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "step",
+                "lexical_similarity",
+                "semantic_similarity",
+                "earliness",
+                "U_step",
+                "prefix"
+              ],
+              "properties": {
+                "step": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "lexical_similarity": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "semantic_similarity": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "earliness": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "U_step": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "description": "Per-step utility"
+                },
+                "prefix": {
+                  "type": "string",
+                  "description": "Model's predicted prefix at this step"
+                }
+              }
+            }
+          },
+          "best_step": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Index of the step with the maximum U_step (early-tie-breaking unchanged)"
+          },
+          "U_best": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Utility at best_step"
+          },
+          "total_steps": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "dialogue_summary": {
+      "type": "object",
+      "required": ["average_U_best_early"],
+      "properties": {
+        "average_U_best_early": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Mean of U_best across utterances"
+        }
+      }
+    }
+  }
+}
