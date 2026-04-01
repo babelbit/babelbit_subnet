@@ -1,4 +1,6 @@
-# BabelBit
+<p align="center">
+  <img width="265" height="281" alt="Babelbit logo Black" src="https://github.com/user-attachments/assets/055577f8-0ff4-4d67-9153-e66c00688bb2" />
+</p>
 
 ## What is Babelbit?
 ### Background Theory
