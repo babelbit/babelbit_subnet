@@ -56,8 +56,8 @@ class MockSession:
         self.get_calls = []
         self.post_calls = []
 
-    def get(self, url, params=None):
-        self.get_calls.append((url, params))
+    def get(self, url, params=None, **kwargs):
+        self.get_calls.append((url, params, kwargs))
         if self.get_exc:
             raise self.get_exc
         return self.get_response
@@ -82,6 +82,19 @@ class FakeConnectorError(Exception):
 class FakeTimeout:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
+
+
+def test_validate_int_env_parser_handles_empty_and_invalid_values(monkeypatch):
+    from babelbit.cli import validate as validate_mod
+
+    monkeypatch.setenv("BB_DEFAULT_FALLBACK_UID", "")
+    monkeypatch.setenv("BB_MAX_SKIPPED_WEIGHT_EPOCHS", "   ")
+
+    assert validate_mod._get_int_env("BB_DEFAULT_FALLBACK_UID", 248) == 248
+    assert validate_mod._get_int_env("BB_MAX_SKIPPED_WEIGHT_EPOCHS", 12) == 12
+
+    monkeypatch.setenv("BB_DEFAULT_FALLBACK_UID", "not-an-int")
+    assert validate_mod._get_int_env("BB_DEFAULT_FALLBACK_UID", 248) == 248
 
 
 def test_reset_no_score_if_challenge_changed():
@@ -182,6 +195,116 @@ async def test_get_weights_updates_metrics_and_prefers_first_occurrence(monkeypa
     assert ("0", 0.4) in scores_gauge.calls
     assert ("1", 0.9) in scores_gauge.calls
     assert winner_gauge.value == 1
+
+
+@pytest.mark.asyncio
+async def test_get_weights_splits_main_and_arena_modes(monkeypatch):
+    """Split 95% core incentive by mode while preserving 5% trailing."""
+    fake_settings = SimpleNamespace(BB_SUBMIT_API_URL="http://api")
+    from babelbit.cli import validate as validate_mod
+
+    monkeypatch.setattr(validate_mod, "get_settings", lambda: fake_settings)
+    monkeypatch.setattr(
+        validate_mod,
+        "fetch_scores_from_api",
+        AsyncMock(
+            return_value=[
+                {"miner_hotkey": "hk-main", "challenge_type": "main", "challenge_mean_score": 0.9},
+                {"miner_hotkey": "hk-main", "challenge_type": "arena", "challenge_mean_score": 0.3},
+                {"miner_hotkey": "hk-arena", "challenge_type": "main", "challenge_mean_score": 0.2},
+                {"miner_hotkey": "hk-arena", "challenge_type": "arena", "challenge_mean_score": 0.95},
+                {"miner_hotkey": "hk-tail", "challenge_type": "main", "challenge_mean_score": 0.5},
+                {"miner_hotkey": "hk-tail", "challenge_type": "arena", "challenge_mean_score": 0.4},
+            ]
+        ),
+    )
+
+    uids, weights, no_score_rounds = await validate_mod.get_weights(
+        metagraph=SimpleNamespace(hotkeys=["hk-main", "hk-arena", "hk-tail"]),
+        validator_kp=SimpleNamespace(ss58_address="validator-hk"),
+        challenge_uid="chal-modes",
+        last_weights=None,
+        no_score_rounds=0,
+        max_no_score_rounds=5,
+        default_uid=248,
+        arena_incentive_fraction=0.4,
+    )
+
+    # Main winner uid=0 gets 57%; arena winner uid=1 gets 38%; trailing uid=2 gets 5%.
+    assert uids == [0, 1, 2]
+    assert weights == pytest.approx([0.57, 0.38, 0.05])
+    assert no_score_rounds == 0
+
+
+@pytest.mark.asyncio
+async def test_get_weights_fetches_mode_specific_scores(monkeypatch):
+    """Fetch main/arena mode scores separately and combine winners."""
+    fake_settings = SimpleNamespace(BB_SUBMIT_API_URL="http://api")
+    from babelbit.cli import validate as validate_mod
+
+    monkeypatch.setattr(validate_mod, "get_settings", lambda: fake_settings)
+
+    async def fake_fetch(*, base_url, validator_kp, challenge_uid, challenge_type=None):
+        assert base_url == "http://api"
+        assert challenge_uid == "chal-modes"
+        if challenge_type == "main":
+            return [{"miner_hotkey": "hk-main", "challenge_mean_score": 0.9}]
+        if challenge_type == "arena":
+            return [{"miner_hotkey": "hk-arena", "challenge_mean_score": 0.95}]
+        return []
+
+    fetch_mock = AsyncMock(side_effect=fake_fetch)
+    monkeypatch.setattr(validate_mod, "fetch_scores_from_api", fetch_mock)
+
+    uids, weights, no_score_rounds = await validate_mod.get_weights(
+        metagraph=SimpleNamespace(hotkeys=["hk-main", "hk-arena"]),
+        validator_kp=SimpleNamespace(ss58_address="validator-hk"),
+        challenge_uid="chal-modes",
+        last_weights=None,
+        no_score_rounds=0,
+        max_no_score_rounds=5,
+        default_uid=248,
+        arena_incentive_fraction=0.4,
+    )
+
+    assert uids == [0, 1]
+    assert weights == pytest.approx([0.6, 0.4])
+    assert no_score_rounds == 0
+    assert fetch_mock.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_weights_routes_missing_arena_share_to_default_uid(monkeypatch):
+    fake_settings = SimpleNamespace(BB_SUBMIT_API_URL="http://api")
+    from babelbit.cli import validate as validate_mod
+
+    monkeypatch.setattr(validate_mod, "get_settings", lambda: fake_settings)
+
+    async def fake_fetch(*, base_url, validator_kp, challenge_uid, challenge_type=None):
+        assert base_url == "http://api"
+        assert challenge_uid == "chal-main-only"
+        if challenge_type == "main":
+            return [{"miner_hotkey": "hk-main", "challenge_mean_score": 0.9}]
+        if challenge_type == "arena":
+            return []
+        return []
+
+    monkeypatch.setattr(validate_mod, "fetch_scores_from_api", AsyncMock(side_effect=fake_fetch))
+
+    uids, weights, no_score_rounds = await validate_mod.get_weights(
+        metagraph=SimpleNamespace(hotkeys=["hk-main", "hk-other"]),
+        validator_kp=SimpleNamespace(ss58_address="validator-hk"),
+        challenge_uid="chal-main-only",
+        last_weights=None,
+        no_score_rounds=0,
+        max_no_score_rounds=5,
+        default_uid=248,
+        arena_incentive_fraction=0.4,
+    )
+
+    assert uids == [0, 248]
+    assert weights == pytest.approx([0.6, 0.4])
+    assert no_score_rounds == 0
 
 
 @pytest.mark.asyncio
@@ -319,12 +442,13 @@ async def test_fetch_scores_from_api_success(monkeypatch):
     )
 
     assert scores == [{"hotkey": "hk1", "score": 0.8}]
-    url, params = fake_session.get_calls[0]
+    url, params, kwargs = fake_session.get_calls[0]
     assert url == "http://submit-api/v1/get_scores"
     assert params["signature"] == "sig"
     assert params["hotkey"] == validator_kp.ss58_address
     assert params["challenge_uid"] == "chal-xyz"
     assert isinstance(params["timestamp"], int)
+    assert kwargs["timeout"].total == 30.0
 
     # Canonical payload should match the expected structure
     parsed = json.loads(canonical_holder["payload"])
@@ -332,6 +456,69 @@ async def test_fetch_scores_from_api_success(monkeypatch):
     assert parsed["challenge_id"] == "chal-xyz"
     assert parsed["data"]["challenge_uid"] == "chal-xyz"
     assert isinstance(parsed["timestamp"], int)
+
+
+@pytest.mark.asyncio
+async def test_fetch_scores_from_api_includes_challenge_type(monkeypatch):
+    """challenge_type should be sent as mapped query param, not signed payload."""
+    from babelbit.cli import validate as validate_mod
+
+    fake_session = MockSession(
+        get_response=MockResponse(
+            status=200,
+            json_data={"scores": [{"hotkey": "hk-arena", "score": 0.95}]},
+        )
+    )
+    canonical_holder = {}
+
+    def fake_sign(kp, canonical):
+        canonical_holder["payload"] = canonical
+        return "sig"
+
+    validator_kp = SimpleNamespace(ss58_address="validator-hk")
+    monkeypatch.setattr(validate_mod, "get_async_client", AsyncMock(return_value=fake_session))
+    monkeypatch.setattr(validate_mod, "sign_message", fake_sign)
+
+    scores = await validate_mod.fetch_scores_from_api(
+        base_url="http://submit-api",
+        validator_kp=validator_kp,
+        challenge_uid="chal-xyz",
+        challenge_type="main",
+    )
+
+    assert scores == [{"hotkey": "hk-arena", "score": 0.95}]
+    _, params, kwargs = fake_session.get_calls[0]
+    assert params["challenge_type"] == "qualifying"
+    assert kwargs["timeout"].total == 30.0
+
+    parsed = json.loads(canonical_holder["payload"])
+    assert parsed["data"]["challenge_uid"] == "chal-xyz"
+    assert "challenge_type" not in parsed["data"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_scores_from_api_maps_arena_challenge_type(monkeypatch):
+    from babelbit.cli import validate as validate_mod
+
+    fake_session = MockSession(
+        get_response=MockResponse(
+            status=200,
+            json_data={"scores": [{"hotkey": "hk-arena", "score": 0.95}]},
+        )
+    )
+    monkeypatch.setattr(validate_mod, "get_async_client", AsyncMock(return_value=fake_session))
+    monkeypatch.setattr(validate_mod, "sign_message", lambda *_args, **_kwargs: "sig")
+
+    _ = await validate_mod.fetch_scores_from_api(
+        base_url="http://submit-api",
+        validator_kp=SimpleNamespace(ss58_address="validator-hk"),
+        challenge_uid="chal-xyz",
+        challenge_type="arena",
+    )
+
+    _, params, kwargs = fake_session.get_calls[0]
+    assert params["challenge_type"] == "arena"
+    assert kwargs["timeout"].total == 30.0
 
 
 @pytest.mark.asyncio
@@ -421,7 +608,14 @@ async def test_retry_set_weights_falls_back_on_failure(monkeypatch):
 
     ok = await validate_mod.retry_set_weights(wallet="wallet", uids=[3], weights=[1.0])
     assert ok is True
-    fallback.assert_awaited_once_with("wallet", 7, [3], [1.0], retries=3, delay_s=0.1)
+    fallback.assert_awaited_once_with(
+        wallet="wallet",
+        netuid=7,
+        uids=[3],
+        weights=[1.0],
+        retries=3,
+        delay_s=0.1,
+    )
 
     # Second call: signer raises connector error, still uses fallback
     error_session = MockSession(post_exc=FakeConnectorError("no network"))

@@ -7,7 +7,7 @@ deactivated before completing an utterance (before EOF token).
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from babelbit.utils.predict_utterances import predict_with_utterance_engine_multi_miner
-from babelbit.chute_template.schemas import BBPredictedUtterance
+from babelbit.schemas.prediction import BBPredictedUtterance
 
 
 @pytest.mark.asyncio
@@ -25,7 +25,6 @@ async def test_ground_truth_saved_on_early_termination():
     
     # Mock miner
     mock_miner = MagicMock()
-    mock_miner.slug = "test-miner"
     mock_miner.uid = 123
     mock_miner.hotkey = "test-hotkey"
     
@@ -87,7 +86,7 @@ async def test_ground_truth_saved_on_early_termination():
     # Mock prediction callback that always times out (simulating miner failures)
     prediction_error_count = {"count": 0}
     
-    async def mock_prediction_callback(miner, payload, slug):
+    async def mock_prediction_callback(miner, payload, context):
         """Simulate miner timing out on every prediction"""
         prediction_error_count["count"] += 1
         # Raise timeout error to trigger consecutive error counting
@@ -158,7 +157,6 @@ async def test_ground_truth_normal_completion():
     
     # Mock miner
     mock_miner = MagicMock()
-    mock_miner.slug = "test-miner-normal"
     mock_miner.uid = 456
     mock_miner.hotkey = "test-hotkey-2"
     
@@ -214,7 +212,7 @@ async def test_ground_truth_normal_completion():
     mock_session.post = mock_post
     
     # Mock prediction callback that succeeds
-    async def mock_prediction_callback(miner, payload, slug):
+    async def mock_prediction_callback(miner, payload, context):
         """Simulate successful prediction"""
         return f"prediction_{payload.step}"
     
@@ -258,3 +256,91 @@ async def test_ground_truth_normal_completion():
         assert last_done_step.ground_truth == "Hello world", \
             f"Expected ground_truth='Hello world', got '{last_done_step.ground_truth}'"
         assert last_done_step.done is True, "Step should be marked as done"
+
+
+@pytest.mark.asyncio
+async def test_continue_collecting_dialogues_after_all_miners_deactivate():
+    mock_miner = MagicMock()
+    mock_miner.uid = 789
+    mock_miner.hotkey = "test-hotkey-3"
+    miners = [mock_miner]
+
+    start_response = {
+        "session_id": "test-session-789",
+        "done": False,
+        "word": "alpha",
+        "dialogue_uid": "dlg-1",
+        "utterance_index": 0,
+        "challenge_uid": "ch-003",
+    }
+
+    next_responses = [
+        {"done": False, "word": "EOF", "dialogue_uid": "dlg-1", "utterance_index": 0},
+        {"done": False, "word": "EOF EOF", "dialogue_uid": "dlg-1", "utterance_index": 0},
+        {"done": False, "word": "beta", "dialogue_uid": "dlg-2", "utterance_index": 0},
+        {"done": False, "word": "EOF", "dialogue_uid": "dlg-2", "utterance_index": 0},
+        {"done": False, "word": "EOF EOF", "dialogue_uid": "dlg-2", "utterance_index": 0},
+        {"done": False, "word": "gamma", "dialogue_uid": "dlg-3", "utterance_index": 0},
+        {"done": False, "word": "EOF", "dialogue_uid": "dlg-3", "utterance_index": 0},
+        {"done": True, "word": "EOF EOF", "dialogue_uid": "dlg-3", "utterance_index": 0},
+    ]
+
+    mock_response_start = AsyncMock()
+    mock_response_start.status = 200
+    mock_response_start.json = AsyncMock(return_value=start_response)
+
+    call_count = [0]
+
+    def mock_get(*args, **kwargs):
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_response_start)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        return ctx
+
+    def mock_post(*args, **kwargs):
+        response = AsyncMock()
+        response.status = 200
+        idx = call_count[0]
+        call_count[0] += 1
+        response.json = AsyncMock(return_value=next_responses[idx])
+
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=response)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        return ctx
+
+    mock_session = MagicMock()
+    mock_session.get = mock_get
+    mock_session.post = mock_post
+
+    prediction_calls = {"count": 0}
+
+    async def mock_prediction_callback(miner, payload, context):
+        prediction_calls["count"] += 1
+        if prediction_calls["count"] == 1:
+            return "pred-alpha"
+        raise Exception("Prediction timeout after 10.0s")
+
+    with patch('babelbit.utils.predict_utterances.get_async_client', new_callable=AsyncMock) as mock_client, \
+         patch('babelbit.utils.predict_utterances.get_auth_headers', new_callable=AsyncMock) as mock_headers:
+        mock_client.return_value = mock_session
+        mock_headers.return_value = {}
+
+        result = await predict_with_utterance_engine_multi_miner(
+            utterance_engine_url="http://test-engine:8000",
+            miners=miners,
+            prediction_callback=mock_prediction_callback,
+            timeout=10.0,
+            max_prediction_errors=1,
+            continue_after_all_miners_deactivated=True,
+            subtensor=None,
+            step_block_modulo=0,
+        )
+
+    miner_dialogues = result["test-hotkey-3"]
+    assert list(miner_dialogues.keys()) == ["dlg-1", "dlg-2", "dlg-3"]
+    assert miner_dialogues["dlg-1"][-1].ground_truth == "alpha"
+    assert miner_dialogues["dlg-2"][-1].ground_truth == "beta"
+    assert miner_dialogues["dlg-3"][-1].ground_truth == "gamma"
+    assert miner_dialogues["dlg-2"][-1].prediction == ""
+    assert miner_dialogues["dlg-3"][-1].prediction == ""

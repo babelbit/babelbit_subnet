@@ -15,7 +15,7 @@ async def test_runner_skips_processed_miners(tmp_path):
     challenge_uid = 'challenge-xyz'
 
     # Existing processed miner
-    processed_miner = Miner(uid=1, hotkey='hotkey1', model='m1', revision='main', slug='miner-1', chute_id='c1', block=1)
+    processed_miner = Miner(uid=1, hotkey='hotkey1', block=1)
 
     existing_score = {
         'challenge_uid': challenge_uid,
@@ -29,7 +29,7 @@ async def test_runner_skips_processed_miners(tmp_path):
         json.dump(existing_score, f)
 
     # Another miner that should NOT be processed because challenge already has scores
-    new_miner = Miner(uid=2, hotkey='hotkey2', model='m2', revision='main', slug='miner-2', chute_id='c2', block=2)
+    new_miner = Miner(uid=2, hotkey='hotkey2', block=2)
 
     with patch('babelbit.cli.runner.get_settings') as mock_settings, \
         patch('babelbit.cli.runner.get_current_challenge_uid', new_callable=AsyncMock, return_value=challenge_uid), \

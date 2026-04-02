@@ -4,6 +4,8 @@ Simplified test for first token capture fix
 
 Tests that the validator properly captures the first token from /start endpoint.
 """
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from babelbit.utils.predict_utterances import predict_with_utterance_engine_multi_miner
@@ -61,7 +63,6 @@ async def test_single_token_captures_first_token():
     class Miner:
         def __init__(self, hotkey: str):
             self.hotkey = hotkey
-            self.slug = hotkey
 
     miner = Miner("miner-1")
 
@@ -142,7 +143,6 @@ async def test_multi_token_includes_first_token():
     class Miner:
         def __init__(self, hotkey: str):
             self.hotkey = hotkey
-            self.slug = hotkey
 
     miner = Miner("miner-2")
 
@@ -169,6 +169,157 @@ async def test_multi_token_includes_first_token():
         last_step = miner_dialogues["dlg-002"][-1]
         assert last_step.ground_truth == "Hello world", \
             f"Expected 'Hello world', got '{last_step.ground_truth}'"
+
+
+@pytest.mark.asyncio
+async def test_first_step_timeout_overrides_base_timeout():
+    start_response = {
+        "session_id": "test-timeout-1",
+        "word": "Hello",
+        "token": "Hello",
+        "done": False,
+        "utterance_index": 0,
+        "dialogue_uid": "dlg-timeout",
+        "challenge_uid": "ch-timeout",
+    }
+
+    next_responses = [
+        {"token": "EOF", "word": "EOF", "done": False, "utterance_index": 1, "dialogue_uid": "dlg-timeout"},
+        {"token": "EOF EOF", "done": True, "utterance_index": 1, "dialogue_uid": "dlg-timeout"},
+    ]
+
+    mock_response_start = AsyncMock()
+    mock_response_start.status = 200
+    mock_response_start.json = AsyncMock(return_value=start_response)
+
+    call_count = [0]
+
+    def mock_get(*args, **kwargs):
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_response_start)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        return ctx
+
+    def mock_post(*args, **kwargs):
+        response = AsyncMock()
+        response.status = 200
+        response.json = AsyncMock(return_value=next_responses[call_count[0]])
+        call_count[0] += 1
+
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=response)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        return ctx
+
+    mock_session = MagicMock()
+    mock_session.get = mock_get
+    mock_session.post = mock_post
+
+    class Miner:
+        def __init__(self, hotkey: str):
+            self.hotkey = hotkey
+
+    miner = Miner("miner-timeout")
+
+    async def slow_predict(_miner_obj, _payload, _context):
+        await asyncio.sleep(0.02)
+        return "prediction"
+
+    with patch('babelbit.utils.predict_utterances.get_async_client', new_callable=AsyncMock) as mock_client, \
+         patch('babelbit.utils.predict_utterances.get_auth_headers', new_callable=AsyncMock) as mock_headers:
+
+        mock_client.return_value = mock_session
+        mock_headers.return_value = {}
+
+        dialogues = await predict_with_utterance_engine_multi_miner(
+            utterance_engine_url="http://test:8000",
+            miners=[miner],
+            prediction_callback=slow_predict,
+            timeout=0.001,
+            first_step_timeout=0.05,
+        )
+
+        first_step = dialogues[miner.hotkey]["dlg-timeout"][0]
+        assert first_step.prediction == "prediction"
+
+
+@pytest.mark.asyncio
+async def test_first_step_timeout_persists_until_first_non_empty_prediction():
+    start_response = {
+        "session_id": "test-timeout-2",
+        "word": "Hello",
+        "token": "Hello",
+        "done": False,
+        "utterance_index": 0,
+        "dialogue_uid": "dlg-timeout-2",
+        "challenge_uid": "ch-timeout-2",
+    }
+
+    next_responses = [
+        {"token": "world", "word": "world", "done": False, "utterance_index": 0, "dialogue_uid": "dlg-timeout-2"},
+        {"token": "EOF", "word": "EOF", "done": False, "utterance_index": 1, "dialogue_uid": "dlg-timeout-2"},
+        {"token": "EOF EOF", "done": True, "utterance_index": 1, "dialogue_uid": "dlg-timeout-2"},
+    ]
+
+    mock_response_start = AsyncMock()
+    mock_response_start.status = 200
+    mock_response_start.json = AsyncMock(return_value=start_response)
+
+    call_count = [0]
+
+    def mock_get(*args, **kwargs):
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_response_start)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        return ctx
+
+    def mock_post(*args, **kwargs):
+        response = AsyncMock()
+        response.status = 200
+        response.json = AsyncMock(return_value=next_responses[call_count[0]])
+        call_count[0] += 1
+
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=response)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        return ctx
+
+    mock_session = MagicMock()
+    mock_session.get = mock_get
+    mock_session.post = mock_post
+
+    class Miner:
+        def __init__(self, hotkey: str):
+            self.hotkey = hotkey
+
+    miner = Miner("miner-timeout-2")
+    prediction_calls = {"count": 0}
+
+    async def slow_startup_predict(_miner_obj, _payload, _context):
+        prediction_calls["count"] += 1
+        await asyncio.sleep(0.02)
+        if prediction_calls["count"] == 1:
+            return ""
+        return "prediction"
+
+    with patch('babelbit.utils.predict_utterances.get_async_client', new_callable=AsyncMock) as mock_client, \
+         patch('babelbit.utils.predict_utterances.get_auth_headers', new_callable=AsyncMock) as mock_headers:
+
+        mock_client.return_value = mock_session
+        mock_headers.return_value = {}
+
+        dialogues = await predict_with_utterance_engine_multi_miner(
+            utterance_engine_url="http://test:8000",
+            miners=[miner],
+            prediction_callback=slow_startup_predict,
+            timeout=0.001,
+            first_step_timeout=0.05,
+        )
+
+        steps = dialogues[miner.hotkey]["dlg-timeout-2"]
+        assert len(steps) == 2
+        assert steps[0].prediction == ""
+        assert steps[1].prediction == "prediction"
 
 
 if __name__ == "__main__":

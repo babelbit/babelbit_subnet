@@ -30,9 +30,21 @@ def close_http_clients():
     if loop and loop.is_running():
         # On est dans un loop en cours: planifie la fermeture
         loop.create_task(_close_all_clients_async())
+        try:
+            from babelbit.utils.subtensor_gateway_client import close_gateway_clients
+
+            loop.create_task(close_gateway_clients())
+        except Exception:
+            pass
     else:
         # Lance un mini loop juste pour fermer proprement
         run(_close_all_clients_async())
+        try:
+            from babelbit.utils.subtensor_gateway_client import close_gateway_clients
+
+            run(close_gateway_clients())
+        except Exception:
+            pass
 
 
 def _loop_key() -> int:

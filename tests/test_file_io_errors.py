@@ -23,7 +23,7 @@ from babelbit.utils.file_handling import (
     get_processed_miners_for_challenge
 )
 from babelbit.utils.miner_registry import Miner
-from babelbit.chute_template.schemas import BBPredictedUtterance
+from babelbit.schemas.prediction import BBPredictedUtterance
 
 
 class TestFileIOErrorHandling:
@@ -35,7 +35,7 @@ class TestFileIOErrorHandling:
         
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
-        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_MINER_TIMEOUT_SEC = 10.0
         
         # Use non-existent path
         logs_dir = tmp_path / "nonexistent" / "logs" / "deep"
@@ -44,8 +44,7 @@ class TestFileIOErrorHandling:
         assert not logs_dir.exists(), "Log directory should not exist initially"
         
         sample_miner = Miner(
-            uid=1, hotkey="test_hotkey", model="test/model",
-            revision="main", slug="test-miner", chute_id="chute1", block=100
+            uid=1, hotkey="test_hotkey", block=100
         )
         
         # Minimal dialogues to test file operations
@@ -114,15 +113,15 @@ class TestFileIOErrorHandling:
         
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
-        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_MINER_TIMEOUT_SEC = 10.0
         
         logs_dir = tmp_path / "logs"
         scores_dir = tmp_path / "scores"
         logs_dir.mkdir()
         scores_dir.mkdir()
         
-        miner1 = Miner(uid=1, hotkey="hotkey1", model="test/model1", revision="main", slug="miner-1", chute_id="chute1", block=100)
-        miner2 = Miner(uid=2, hotkey="hotkey2", model="test/model2", revision="main", slug="miner-2", chute_id="chute2", block=101)
+        miner1 = Miner(uid=1, hotkey="hotkey1", block=100)
+        miner2 = Miner(uid=2, hotkey="hotkey2", block=101)
         
         dialogues = {
             "hotkey1": {
@@ -264,7 +263,7 @@ class TestFileIOErrorHandling:
         
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
-        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_MINER_TIMEOUT_SEC = 10.0
         
         with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
              patch('babelbit.cli.runner.init_utterance_auth'), \

@@ -11,14 +11,39 @@ Tests cover:
 import pytest
 import asyncio
 import time
+import os
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
 from pathlib import Path
 
-from babelbit.cli.runner import runner_loop
+from babelbit.cli.runner import (
+    _format_runner_startup_context,
+    _get_runner_build_info,
+    runner_loop,
+)
+
+# Keep runner-loop tests deterministic regardless of developer shell env.
+os.environ["BB_RUNNER_ON_STARTUP"] = "0"
+os.environ["BB_ENABLE_ARENA_CHALLENGE"] = "0"
+os.environ["BB_ARENA_RUN_ON_STARTUP"] = "0"
 
 
 class TestRunnerLoopBlockSynchronization:
     """Test suite for block synchronization and tempo-based scheduling"""
+
+    def test_runner_startup_context_includes_git_metadata(self):
+        branch_result = Mock()
+        branch_result.stdout = "fix/lag\n"
+        commit_result = Mock()
+        commit_result.stdout = "22b8fe8\n"
+        status_result = Mock()
+        status_result.stdout = ""
+
+        with patch("babelbit.cli.runner.subprocess.run", side_effect=[branch_result, commit_result, status_result]):
+            _get_runner_build_info.cache_clear()
+            build_info = _get_runner_build_info()
+
+        assert build_info == "branch=fix/lag commit=22b8fe8 state=clean"
+        assert _format_runner_startup_context(version="0.1.0") == "branch=fix/lag commit=22b8fe8 state=clean version=0.1.0"
 
     @pytest.mark.asyncio
     async def test_runner_loop_tempo_based_scheduling(self):
@@ -318,7 +343,8 @@ class TestRunnerLoopBlockSynchronization:
              patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock), \
              patch('babelbit.cli.runner.get_subtensor', new_callable=AsyncMock, return_value=mock_subtensor), \
              patch('babelbit.cli.runner.reset_subtensor', new_callable=AsyncMock), \
-             patch('babelbit.cli.runner.runner', new_callable=AsyncMock, side_effect=mock_runner):
+             patch('babelbit.cli.runner.runner', new_callable=AsyncMock, side_effect=mock_runner), \
+             patch.dict('os.environ', {'BB_RUNNER_ON_STARTUP': '1'}):
             
             try:
                 await asyncio.wait_for(runner_loop(), timeout=1.0)
@@ -375,6 +401,67 @@ class TestRunnerLoopBlockSynchronization:
         
         # Should have called reset_subtensor at least once after connection error
         assert len(reset_calls) >= 1, f"Expected reset_subtensor to be called after error, got {len(reset_calls)} calls"
+
+    @pytest.mark.asyncio
+    async def test_runner_loop_round2_separate_block_cadence(self):
+        """Round2 should run on its own block cadence, independently of main tempo."""
+
+        mock_settings = Mock()
+        mock_settings.BABELBIT_NETUID = 42
+        mock_settings.BB_RUNNER_ON_STARTUP = False
+
+        blocks = [99, 100, 101, 200, 201, 300]
+        block_idx = [0]
+        main_calls = []
+        round2_calls = []
+
+        async def mock_get_current_block():
+            if block_idx[0] >= len(blocks):
+                return 301
+            block = blocks[block_idx[0]]
+            block_idx[0] += 1
+            return block
+
+        async def mock_wait_for_block():
+            await asyncio.sleep(0.01)
+
+        async def mock_runner(subtensor=None):
+            main_calls.append(subtensor)
+            await asyncio.sleep(0.01)
+
+        async def mock_runner_round2(subtensor=None):
+            round2_calls.append(subtensor)
+            await asyncio.sleep(0.01)
+            if len(round2_calls) >= 3:
+                raise asyncio.CancelledError()
+
+        mock_subtensor = Mock()
+        mock_subtensor.get_current_block = mock_get_current_block
+        mock_subtensor.wait_for_block = mock_wait_for_block
+
+        with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
+             patch('babelbit.cli.runner.init_utterance_auth'), \
+             patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock), \
+             patch('babelbit.cli.runner.get_subtensor', new_callable=AsyncMock, return_value=mock_subtensor), \
+             patch('babelbit.cli.runner.reset_subtensor', new_callable=AsyncMock), \
+             patch('babelbit.cli.runner.runner', new_callable=AsyncMock, side_effect=mock_runner), \
+             patch('babelbit.cli.runner.runner_round2', new_callable=AsyncMock, side_effect=mock_runner_round2), \
+             patch.dict('os.environ', {
+                 'BABELBIT_RUNNER_TEMPO': '300',
+                 'BB_ENABLE_ARENA_CHALLENGE': '1',
+                 'BB_ARENA_CADENCE_BLOCKS': '100',
+                 'BB_ARENA_RUN_ON_STARTUP': '0',
+             }):
+
+            try:
+                await asyncio.wait_for(runner_loop(), timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+
+        # Round2 cadence should trigger at blocks 100, 200, and 300.
+        assert len(round2_calls) >= 3, f"Expected at least 3 round2 calls, got {len(round2_calls)}"
+        # Main cadence should only trigger at block 300.
+        assert len(main_calls) >= 1, "Expected at least one main runner call"
 
 
 if __name__ == "__main__":

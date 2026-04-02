@@ -16,7 +16,7 @@ from pathlib import Path
 from babelbit.cli.runner import runner
 from babelbit.utils.predict_utterances import get_current_challenge_uid
 from babelbit.utils.miner_registry import Miner
-from babelbit.chute_template.schemas import BBPredictedUtterance
+from babelbit.schemas.prediction import BBPredictedUtterance
 
 
 class TestChallengeUIDEdgeCases:
@@ -28,7 +28,7 @@ class TestChallengeUIDEdgeCases:
         
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
-        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_MINER_TIMEOUT_SEC = 10.0
         
         logs_dir = tmp_path / "logs"
         scores_dir = tmp_path / "scores"
@@ -56,14 +56,13 @@ class TestChallengeUIDEdgeCases:
         
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
-        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_MINER_TIMEOUT_SEC = 10.0
         
         logs_dir = tmp_path / "logs"
         scores_dir = tmp_path / "scores"
         
         sample_miner = Miner(
-            uid=1, hotkey="test_hotkey", model="test/model",
-            revision="main", slug="test-miner", chute_id="chute1", block=100
+            uid=1, hotkey="test_hotkey", block=100
         )
         
         dialogues = {
@@ -155,8 +154,7 @@ class TestChallengeUIDEdgeCases:
             json.dump(existing_score, f)
         
         sample_miner = Miner(
-            uid=2, hotkey="new_hotkey", model="test/model",
-            revision="main", slug="new-miner", chute_id="chute2", block=200
+            uid=2, hotkey="new_hotkey", block=200
         )
         
         with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
@@ -201,7 +199,7 @@ class TestChallengeUIDEdgeCases:
         
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
-        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_MINER_TIMEOUT_SEC = 10.0
         
         logs_dir = tmp_path / "logs"
         scores_dir = tmp_path / "scores"
@@ -210,8 +208,7 @@ class TestChallengeUIDEdgeCases:
         challenge_uid = "challenge-abc_def.123"
         
         sample_miner = Miner(
-            uid=1, hotkey="test_hotkey", model="test/model",
-            revision="main", slug="test-miner", chute_id="chute1", block=100
+            uid=1, hotkey="test_hotkey", block=100
         )
         
         dialogues = {
@@ -252,7 +249,7 @@ class TestChallengeUIDEdgeCases:
         
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
-        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_MINER_TIMEOUT_SEC = 10.0
         
         logs_dir = tmp_path / "logs"
         scores_dir = tmp_path / "scores"
@@ -261,8 +258,7 @@ class TestChallengeUIDEdgeCases:
         challenge_uid = "challenge-" + "x" * 240
         
         sample_miner = Miner(
-            uid=1, hotkey="test_hotkey", model="test/model",
-            revision="main", slug="test-miner", chute_id="chute1", block=100
+            uid=1, hotkey="test_hotkey", block=100
         )
         
         dialogues = {
@@ -329,7 +325,7 @@ class TestChallengeUIDEdgeCases:
         
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
-        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_MINER_TIMEOUT_SEC = 10.0
         
         logs_dir = tmp_path / "logs"
         scores_dir = tmp_path / "scores"
@@ -345,8 +341,7 @@ class TestChallengeUIDEdgeCases:
                 return "challenge-new"
         
         sample_miner = Miner(
-            uid=1, hotkey="test_hotkey", model="test/model",
-            revision="main", slug="test-miner", chute_id="chute1", block=100
+            uid=1, hotkey="test_hotkey", block=100
         )
         
         dialogues = {

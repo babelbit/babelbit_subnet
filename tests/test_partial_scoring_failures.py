@@ -16,7 +16,7 @@ import json
 
 from babelbit.cli.runner import runner, group_steps_into_utterances
 from babelbit.utils.miner_registry import Miner
-from babelbit.chute_template.schemas import BBPredictedUtterance
+from babelbit.schemas.prediction import BBPredictedUtterance
 
 
 class TestPartialScoringFailures:
@@ -28,14 +28,13 @@ class TestPartialScoringFailures:
         
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
-        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_MINER_TIMEOUT_SEC = 10.0
         
         logs_dir = tmp_path / "logs"
         scores_dir = tmp_path / "scores"
         
         sample_miner = Miner(
-            uid=1, hotkey="test_hotkey", model="test/model",
-            revision="main", slug="test-miner", chute_id="chute1", block=100
+            uid=1, hotkey="test_hotkey", block=100
         )
         
         # Utterance steps without final done=True (incomplete)
@@ -105,14 +104,14 @@ class TestPartialScoringFailures:
         
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
-        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_MINER_TIMEOUT_SEC = 10.0
         
         logs_dir = tmp_path / "logs"
         scores_dir = tmp_path / "scores"
         
-        miner1 = Miner(uid=1, hotkey="hotkey1", model="test/model1", revision="main", slug="miner-1", chute_id="chute1", block=100)
-        miner2 = Miner(uid=2, hotkey="hotkey2", model="test/model2", revision="main", slug="miner-2", chute_id="chute2", block=101)
-        miner3 = Miner(uid=3, hotkey="hotkey3", model="test/model3", revision="main", slug="miner-3", chute_id="chute3", block=102)
+        miner1 = Miner(uid=1, hotkey="hotkey1", block=100)
+        miner2 = Miner(uid=2, hotkey="hotkey2", block=101)
+        miner3 = Miner(uid=3, hotkey="hotkey3", block=102)
         
         # Mixed results: miner-1 succeeds, miner-2 has no dialogues, miner-3 succeeds
         mixed_results = {
@@ -160,14 +159,13 @@ class TestPartialScoringFailures:
         
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
-        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_MINER_TIMEOUT_SEC = 10.0
         
         logs_dir = tmp_path / "logs"
         scores_dir = tmp_path / "scores"
         
         sample_miner = Miner(
-            uid=1, hotkey="test_hotkey", model="test/model",
-            revision="main", slug="test-miner", chute_id="chute1", block=100
+            uid=1, hotkey="test_hotkey", block=100
         )
         
         # Multiple dialogues
@@ -218,14 +216,13 @@ class TestPartialScoringFailures:
         
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
-        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_MINER_TIMEOUT_SEC = 10.0
         
         logs_dir = tmp_path / "logs"
         scores_dir = tmp_path / "scores"
         
         sample_miner = Miner(
-            uid=1, hotkey="test_hotkey", model="test/model",
-            revision="main", slug="test-miner", chute_id="chute1", block=100
+            uid=1, hotkey="test_hotkey", block=100
         )
         
         multi_dialogues = {
@@ -281,26 +278,24 @@ class TestPartialScoringFailures:
                 assert summary['challenge_mean_U'] == 0.5  # Both successful dialogues scored 0.5
 
     @pytest.mark.asyncio
-    async def test_runner_handles_miner_with_no_slug(self, tmp_path):
-        """Test that runner handles miners without slug (axon-only miners) properly"""
+    async def test_runner_uses_hotkey_for_miner_mapping(self, tmp_path):
+        """Test that runner consistently maps miner dialogues by hotkey."""
         
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
-        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_MINER_TIMEOUT_SEC = 10.0
         
         logs_dir = tmp_path / "logs"
         scores_dir = tmp_path / "scores"
         
-        # Axon-only miner without slug (should still be scored using hotkey)
-        miner_no_slug = Miner(
-            uid=1, hotkey="test_hotkey_axon", model=None,
-            revision=None, slug=None, chute_id=None, block=100,
+        miner_one = Miner(
+            uid=1, hotkey="test_hotkey_axon", block=100,
             axon_ip="192.168.1.1", axon_port=8091
         )
         
-        miner_with_slug = Miner(
-            uid=2, hotkey="test_hotkey_chute", model="test/model2",
-            revision="main", slug="valid-miner", chute_id="chute2", block=101
+        miner_two = Miner(
+            uid=2, hotkey="test_hotkey_alt", block=101,
+            axon_ip="192.168.1.2", axon_port=8091
         )
         
         # Both miners get tracked by hotkey now
@@ -308,8 +303,8 @@ class TestPartialScoringFailures:
             "test_hotkey_axon": {
                 "dlg-1": [BBPredictedUtterance(index="utt-1", step=0, prefix="Test", prediction="axon_output", done=True, ground_truth="Test axon_output EOF")]
             },
-            "test_hotkey_chute": {
-                "dlg-2": [BBPredictedUtterance(index="utt-2", step=0, prefix="Test", prediction="chute_output", done=True, ground_truth="Test chute_output EOF")]
+            "test_hotkey_alt": {
+                "dlg-2": [BBPredictedUtterance(index="utt-2", step=0, prefix="Test", prediction="alt_output", done=True, ground_truth="Test alt_output EOF")]
             }
         }
         
@@ -317,7 +312,7 @@ class TestPartialScoringFailures:
              patch('babelbit.cli.runner.init_utterance_auth'), \
              patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock), \
              patch('babelbit.cli.runner.get_current_challenge_uid', new_callable=AsyncMock, return_value="challenge-123"), \
-             patch('babelbit.cli.runner.get_miners_from_registry', new_callable=AsyncMock, return_value={1: miner_no_slug, 2: miner_with_slug}), \
+             patch('babelbit.cli.runner.get_miners_from_registry', new_callable=AsyncMock, return_value={1: miner_one, 2: miner_two}), \
              patch('babelbit.cli.runner.predict_with_utterance_engine_multi_miner', new_callable=AsyncMock, return_value=dialogues), \
              patch('babelbit.cli.runner.score_jsonl', return_value={"dialogue_summary": {"average_U_best_early": 0.5}, "utterances": []}), \
              patch('babelbit.cli.runner.close_http_clients'):
@@ -333,8 +328,8 @@ class TestPartialScoringFailures:
             score_files = list(scores_dir.glob("*-score.json"))
             miner1_files = [f for f in score_files if "_miner_1_" in f.name]
             miner2_files = [f for f in score_files if "_miner_2_" in f.name]
-            assert len(miner1_files) > 0, "Axon miner (no slug) should now have score files"
-            assert len(miner2_files) > 0, "Chute miner (with slug) should have score files"
+            assert len(miner1_files) > 0, "Miner 1 should have score files"
+            assert len(miner2_files) > 0, "Miner 2 should have score files"
 
     @pytest.mark.asyncio
     async def test_runner_handles_empty_utterance_list(self, tmp_path):
@@ -342,14 +337,13 @@ class TestPartialScoringFailures:
         
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
-        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_MINER_TIMEOUT_SEC = 10.0
         
         logs_dir = tmp_path / "logs"
         scores_dir = tmp_path / "scores"
         
         sample_miner = Miner(
-            uid=1, hotkey="test_hotkey", model="test/model",
-            revision="main", slug="test-miner", chute_id="chute1", block=100
+            uid=1, hotkey="test_hotkey", block=100
         )
         
         # Dialogue with empty utterance list
@@ -409,14 +403,13 @@ class TestPartialScoringFailures:
         
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
-        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_MINER_TIMEOUT_SEC = 10.0
         
         logs_dir = tmp_path / "logs"
         scores_dir = tmp_path / "scores"
         
         sample_miner = Miner(
-            uid=1, hotkey="test_hotkey", model="test/model",
-            revision="main", slug="test-miner", chute_id="chute1", block=100
+            uid=1, hotkey="test_hotkey", block=100
         )
         
         # Miner with dialogues but all scoring fails
@@ -483,15 +476,14 @@ class TestPartialScoringFailures:
         """Test that runner skips utterances with empty ground truth"""
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
-        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_MINER_TIMEOUT_SEC = 10.0
         mock_settings.S3_LOG_DIR = "logs"
         
         logs_dir = tmp_path / "logs"
         scores_dir = tmp_path / "scores"
         
         sample_miner = Miner(
-            uid=1, hotkey="test_hotkey", model="test/model",
-            revision="main", slug="test-miner", chute_id="chute1", block=100
+            uid=1, hotkey="test_hotkey", block=100
         )
         
         # Utterance with empty ground truth (timeout scenario)
@@ -540,15 +532,14 @@ class TestPartialScoringFailures:
         """Test that runner only scores utterances with valid ground truth"""
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
-        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_MINER_TIMEOUT_SEC = 10.0
         mock_settings.S3_LOG_DIR = "logs"
         
         logs_dir = tmp_path / "logs"
         scores_dir = tmp_path / "scores"
         
         sample_miner = Miner(
-            uid=1, hotkey="test_hotkey", model="test/model",
-            revision="main", slug="test-miner", chute_id="chute1", block=100
+            uid=1, hotkey="test_hotkey", block=100
         )
         
         # Mix of valid and empty ground truth

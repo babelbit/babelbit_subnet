@@ -21,12 +21,12 @@ class ValidationSubmissionClient:
         self,
         base_url: Optional[str] = None,
         enabled: Optional[bool] = None,
-        timeout: int = 10,
+        timeout: Optional[int] = None,
     ) -> None:
         settings = get_settings()
         self.base_url = (base_url or settings.BB_SUBMIT_API_URL).rstrip("/")
         self.submit_url = f"{self.base_url}/v1/submit"
-        self.timeout = timeout
+        self.timeout = timeout if timeout is not None else int(os.getenv("BB_SUBMIT_TIMEOUT_S", "30"))
         if enabled is None:
             enabled = os.getenv("BB_ENABLE_VALIDATION_SUBMISSIONS", "1").lower() in {"1", "true", "yes"}
         self.enabled = bool(enabled)
@@ -113,6 +113,7 @@ class ValidationSubmissionClient:
                 return False
             payload["kind"] = outbound_kind
 
+        started_at = time.perf_counter()
         try:
             response = await asyncio.to_thread(
                 requests.post,
@@ -123,23 +124,37 @@ class ValidationSubmissionClient:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning("Validation submit failed for %s (%s): %s", file_path.name, file_type, e)
+            elapsed_s = time.perf_counter() - started_at
+            logger.warning(
+                "Validation submit failed for %s (%s) via %s after %.2fs (timeout=%ss): %s",
+                file_path.name,
+                file_type,
+                self.submit_url,
+                elapsed_s,
+                self.timeout,
+                e,
+            )
             return False
 
         if response.status_code != 200:
+            elapsed_s = time.perf_counter() - started_at
             logger.warning(
-                "Validation submit rejected for %s (%s): %s %s",
+                "Validation submit rejected for %s (%s) via %s after %.2fs: %s %s",
                 file_path.name,
                 file_type,
+                self.submit_url,
+                elapsed_s,
                 response.status_code,
                 response.text,
             )
             return False
 
+        elapsed_s = time.perf_counter() - started_at
         logger.info(
-            "Validation submit accepted for %s (%s) via %s",
+            "Validation submit accepted for %s (%s) via %s in %.2fs",
             file_path.name,
             file_type,
             self.submit_url,
+            elapsed_s,
         )
         return True

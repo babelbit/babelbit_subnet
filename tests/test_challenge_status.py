@@ -88,3 +88,25 @@ def test_mark_challenge_without_optional_fields(tmp_path, monkeypatch):
     assert status["total_dialogues"] == 6
     assert status["mean_score"] is None
     assert status["metadata"] == {}
+
+
+def test_mark_challenge_normalizes_arena_type(tmp_path, monkeypatch):
+    """Test that legacy round2 inputs are stored and read back as arena."""
+    monkeypatch.setenv("BB_CHALLENGE_STATUS_DIR", str(tmp_path / "status"))
+
+    challenge_uid = "test-challenge-arena"
+    mark_challenge_processed(
+        challenge_uid=challenge_uid,
+        miner_count=2,
+        total_dialogues=4,
+        challenge_type="round2",
+    )
+
+    status_dir = get_challenge_status_dir()
+    assert (status_dir / f"{challenge_uid}__arena.json").exists()
+    assert is_challenge_processed(challenge_uid, challenge_type="arena")
+    assert is_challenge_processed(challenge_uid, challenge_type="round2")
+
+    status = get_challenge_status(challenge_uid, challenge_type="arena")
+    assert status is not None
+    assert status["challenge_type"] == "arena"

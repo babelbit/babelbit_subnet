@@ -13,12 +13,13 @@ import tempfile
 import os
 import json
 import shutil
+from concurrent.futures.process import BrokenProcessPool
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
 from typing import List
 from pathlib import Path
 
 from babelbit.cli.runner import runner
-from babelbit.chute_template.schemas import BBPredictedUtterance, BBUtteranceEvaluation
+from babelbit.schemas.prediction import BBPredictedUtterance, BBUtteranceEvaluation
 from babelbit.utils.miner_registry import Miner
 
 
@@ -65,16 +66,16 @@ def mock_settings():
 def sample_miners():
     """Sample miners for testing"""
     return {
-        1: Miner(uid=1, hotkey="hotkey1", model="test/model1", revision="main", slug="test-miner-1", chute_id="chute1", block=100),
-        2: Miner(uid=2, hotkey="hotkey2", model="test/model2", revision="main", slug="test-miner-2", chute_id="chute2", block=101),
-        3: Miner(uid=3, hotkey="hotkey3", model="test/model3", revision="main", slug="test-miner-3", chute_id="chute3", block=102),
+        1: Miner(uid=1, hotkey="hotkey1", block=100),
+        2: Miner(uid=2, hotkey="hotkey2", block=101),
+        3: Miner(uid=3, hotkey="hotkey3", block=102),
     }
 
 
 @pytest.fixture
 def sample_dialogue_utterances():
     """Sample dialogue utterances that would be returned by predict_with_utterance_engine_multi_miner"""
-    # Returns dict mapping miner_slug -> {dialogue_uid -> [utterances]}
+    # Returns dict mapping miner_hotkey -> {dialogue_uid -> [utterances]}
     single_dialogue = {
         "dialogue-123": [
             BBPredictedUtterance(
@@ -168,7 +169,7 @@ class TestRunner:
             
             # Setup mocks
             mock_get_miners.return_value = sample_miners
-            mock_predict.return_value = sample_dialogue_utterances  # Dict of miner_slug -> dialogues
+            mock_predict.return_value = sample_dialogue_utterances  # Dict of miner_hotkey -> dialogues
             # evaluate removed in file scorer mode
             
             # Run the function
@@ -371,12 +372,47 @@ class TestRunner:
 
 
 @pytest.mark.asyncio
+@patch.dict('os.environ', {'BB_MAX_MINERS_PER_RUN': '1'})
+async def test_runner_falls_back_when_scoring_process_pool_breaks(
+    mock_settings,
+    sample_miners,
+    sample_dialogue_utterances,
+    temp_logs_dir,
+    temp_scores_dir,
+):
+    class _BrokenLoop:
+        async def run_in_executor(self, executor, fn, payload):
+            raise BrokenProcessPool("A child process terminated abruptly, the process pool is not usable anymore")
+
+    dummy_pool = object()
+
+    with patch('babelbit.cli.runner.get_settings', return_value=mock_settings), \
+         patch('babelbit.cli.runner.get_current_challenge_uid', new_callable=AsyncMock, return_value="challenge-123"), \
+         patch('babelbit.cli.runner.get_miners_from_registry', new_callable=AsyncMock, return_value=sample_miners), \
+         patch('babelbit.cli.runner.predict_with_utterance_engine_multi_miner', new_callable=AsyncMock, return_value=sample_dialogue_utterances), \
+         patch('babelbit.cli.runner.close_http_clients') as mock_close_clients, \
+         patch('babelbit.cli.runner.init_utterance_auth'), \
+         patch('babelbit.cli.runner.authenticate_utterance_engine', new_callable=AsyncMock), \
+         patch('babelbit.cli.runner._should_use_scoring_process_pool', return_value=True), \
+         patch('babelbit.cli.runner._get_scoring_process_pool', return_value=dummy_pool), \
+         patch('babelbit.cli.runner._shutdown_scoring_process_pool') as mock_shutdown_pool, \
+         patch('babelbit.cli.runner.asyncio.get_running_loop', return_value=_BrokenLoop()):
+        with patch.dict('os.environ', {'BB_OUTPUT_LOGS_DIR': temp_logs_dir}):
+            await runner(output_dir=temp_scores_dir)
+
+    mock_shutdown_pool.assert_called_once()
+    mock_close_clients.assert_called_once()
+    scored_files = [f for f in os.listdir(temp_scores_dir) if f.endswith('-score.json')]
+    assert scored_files, "Expected runner to fall back to thread scoring and produce score files"
+
+
+@pytest.mark.asyncio
 async def test_runner_integration(mock_settings, temp_logs_dir, temp_scores_dir):
     """Integration test with minimal mocking (ensures runner executes with patches)."""
-    mock_miner = Miner(uid=1, hotkey="test_hotkey", model="test/model", revision="main", slug="test-slug", chute_id="test-chute", block=100)
-    # Multi-miner format: {miner_slug: {dialogue_uid: [utterances]}}
+    mock_miner = Miner(uid=1, hotkey="test_hotkey", block=100)
+    # Multi-miner format: {miner_hotkey: {dialogue_uid: [utterances]}}
     mock_dialogues = {
-        "test-slug": {
+        "test_hotkey": {
             "dialogue-int": [
                 BBPredictedUtterance(
                     index="utt-1",
@@ -406,9 +442,9 @@ async def test_runner_integration(mock_settings, temp_logs_dir, temp_scores_dir)
 @pytest.mark.asyncio
 async def test_runner_score_jsonl_unavailable(mock_settings, temp_logs_dir, temp_scores_dir):
     """Test runner behavior when score_jsonl module is unavailable"""
-    mock_miner = Miner(uid=1, hotkey="test_hotkey", model="test/model", revision="main", slug="test-slug", chute_id="test-chute", block=100)
+    mock_miner = Miner(uid=1, hotkey="test_hotkey", block=100)
     mock_dialogues = {
-        "test-slug": {
+        "test_hotkey": {
             "dialogue-score-unavail": [
                 BBPredictedUtterance(
                     index="utt-1",
@@ -437,14 +473,24 @@ async def test_runner_score_jsonl_unavailable(mock_settings, temp_logs_dir, temp
         # Should complete without errors but skip scoring
         mock_predict.assert_called_once()
         
-        # Verify JSONL was written for our specific challenge
+        # Verify JSONL was written for this challenge/type.
         logs_dir = Path(temp_logs_dir)
-        our_jsonl_files = list(logs_dir.glob("dialogue_run_challenge-no-scorer_*.jsonl"))
-        assert len(our_jsonl_files) == 1, f"Expected 1 JSONL file for challenge-no-scorer, found {len(our_jsonl_files)}"
-        
+        our_jsonl_files = list(
+            logs_dir.glob("dialogue_run_challenge-no-scorer_type_main_*.jsonl")
+        )
+        assert len(our_jsonl_files) == 1, (
+            f"Expected 1 typed JSONL file for challenge-no-scorer, found {len(our_jsonl_files)}"
+        )
+        with our_jsonl_files[0].open("r", encoding="utf-8") as jf:
+            rows = [json.loads(line) for line in jf if line.strip()]
+        assert rows, "Expected non-empty dialogue log rows"
+        assert all(row.get("challenge_type") == "main" for row in rows)
+
         # No score files should be created when score_jsonl is None
         scores_dir = Path(temp_scores_dir)
-        our_score_files = list(scores_dir.glob("dialogue_run_challenge-no-scorer_*-score.json"))
+        our_score_files = list(
+            scores_dir.glob("dialogue_run_challenge-no-scorer_type_main_*-score.json")
+        )
         assert len(our_score_files) == 0, f"Expected 0 score files when scorer unavailable, found {len(our_score_files)}"
 
 

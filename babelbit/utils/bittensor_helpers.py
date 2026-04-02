@@ -10,8 +10,6 @@ from substrateinterface import Keypair
 from bittensor import wallet, async_subtensor
 
 from babelbit.utils.settings import get_settings
-from babelbit.utils.huggingface_helpers import get_huggingface_repo_name
-
 logger = getLogger(__name__)
 
 _SUBTENSOR = None
@@ -103,57 +101,6 @@ async def wait_until_block_modulo(subtensor, modulo: int, offset: int = 0):
         if current_block >= target_block:
             logger.info(f"✅ Block sync achieved at block {current_block}")
             return
-
-
-async def on_chain_commit(
-    skip: bool, revision: str, chute_id: str, chute_slug: str | None
-) -> None:
-    # Try real on-chain; fallback to logging if bittensor not available
-    settings = get_settings()
-    repo_name = get_huggingface_repo_name()
-    w = wallet(
-        name=settings.BITTENSOR_WALLET_COLD,
-        hotkey=settings.BITTENSOR_WALLET_HOT,
-    )
-    payload = {
-        "model": repo_name,
-        "revision": revision,
-        "chute_id": chute_id,
-        "slug": chute_slug,
-        "hotkey": w.hotkey.ss58_address,
-    }
-    logger.info("📋 Commit payload: %s", payload)
-    try:
-        if skip:
-            logger.info("⏭️ On-chain commit skipped (skip=True)")
-            logger.info("📄 Payload that would have been committed: %s", payload)
-            return
-
-        logger.info("🔗 Preparing on-chain commitment...")
-        sub = await get_subtensor()
-
-        await sub.set_reveal_commitment(
-            wallet=w,
-            netuid=settings.BABELBIT_NETUID,
-            data=dumps(payload),
-            blocks_until_reveal=1,
-        )
-        logger.info("✅ On-chain commitment submitted successfully")
-    except Exception as e:
-        error_name = type(e).__name__
-        error_msg = str(e)
-        
-        if "AccountNotAllowedCommit" in error_msg:
-            logger.error("❌ On-chain commit failed: Account not authorized to commit to subnet %s", settings.BABELBIT_NETUID)
-            logger.info("💡 This usually means your wallet needs to be registered as a validator/miner first")
-            logger.info("💡 Or you may need to wait for registration confirmation on the network")
-        elif "InsufficientBalance" in error_msg:
-            logger.error("❌ On-chain commit failed: Insufficient balance to pay transaction fees")
-            logger.info("💡 Add more TAO to your coldkey wallet to cover transaction costs")
-        else:
-            logger.error("❌ On-chain commit failed: %s: %s", error_name, error_msg)
-        
-        logger.info("📄 Payload attempted: %s", payload)
 
 
 async def _set_weights_with_confirmation(

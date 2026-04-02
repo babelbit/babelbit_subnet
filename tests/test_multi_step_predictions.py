@@ -18,7 +18,7 @@ from unittest.mock import Mock, AsyncMock, patch
 from pathlib import Path
 
 from babelbit.cli.runner import runner, group_steps_into_utterances
-from babelbit.chute_template.schemas import BBPredictedUtterance
+from babelbit.schemas.prediction import BBPredictedUtterance
 from babelbit.utils.miner_registry import Miner
 
 
@@ -68,7 +68,7 @@ def mock_settings():
     """Mock settings configuration"""
     settings_mock = Mock()
     settings_mock.BABELBIT_NETUID = 42
-    settings_mock.CHUTES_TIMEOUT_SEC = 10.0
+    settings_mock.BB_MINER_TIMEOUT_SEC = 10.0
     return settings_mock
 
 
@@ -78,10 +78,6 @@ def test_miner():
     return Miner(
         uid=1,
         hotkey="5EWYcjAe8rL8HoGJRZtZwK8s9vaKCWAfc9rSjNNydSva3Syc",
-        model="test/model",
-        revision="main",
-        slug="test-miner-1",
-        chute_id="chute-1",
         block=100
     )
 

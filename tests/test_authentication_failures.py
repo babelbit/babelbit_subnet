@@ -32,7 +32,7 @@ class TestAuthenticationFailures:
         
         mock_settings = Mock()
         mock_settings.BABELBIT_NETUID = 42
-        mock_settings.CHUTES_TIMEOUT_SEC = 10.0
+        mock_settings.BB_MINER_TIMEOUT_SEC = 10.0
         mock_settings.BB_RUNNER_ON_STARTUP = False
         
         logs_dir = tmp_path / "logs"

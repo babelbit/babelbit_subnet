@@ -8,6 +8,26 @@ x-common: &common
   mem_limit: "8g"
 
 services:
+  subtensor-gateway:
+    <<: *common
+    mem_reservation: "1g"
+    mem_limit: "1g"
+    container_name: babelbit-subtensor-gateway
+    ports:
+      - "8090:8090"
+    environment:
+      SUBTENSOR_GATEWAY_HOST: 0.0.0.0
+      SUBTENSOR_GATEWAY_PORT: 8090
+    volumes:
+      - ~/.bittensor/wallets:/root/.bittensor/wallets:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8090/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    command: ["bb", "-v", "subtensor-gateway"]
+
   model-cache:
       <<: *common
       container_name: babelbit-model-cache
@@ -35,6 +55,7 @@ services:
     environment:
       - BABELBIT_CACHE_DIR=/app/data/blocks
       - SIGNER_URL=http://signer:8080
+      - SUBTENSOR_GATEWAY_URL=http://subtensor-gateway:8090
       - BB_CHALLENGE_STATUS_DIR=/app/data/challenge_status
       - PG_HOST=${PG_HOST}
       - PG_PORT=${PG_PORT}
@@ -49,6 +70,8 @@ services:
     ports:
       - "8001:8000"
     depends_on:
+      subtensor-gateway:
+        condition: service_healthy
       signer:
         condition: service_healthy
     command: ["bb", "-v", "validate"]
@@ -57,6 +80,8 @@ services:
   runner:
     <<: *common
     container_name: babelbit-runner
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets:ro  # Mount Bittensor wallets
       - challenge-status:/app/data/challenge_status  # Shared challenge status tracking
@@ -67,6 +92,7 @@ services:
       BABELBIT_METRICS_PORT: 8000
       BABELBIT_METRICS_ADDR: 0.0.0.0
       SIGNER_URL: http://signer:8080
+      SUBTENSOR_GATEWAY_URL: http://subtensor-gateway:8090
       BB_CHALLENGE_STATUS_DIR: /app/data/challenge_status
       PG_HOST: ${PG_HOST}
       PG_PORT: ${PG_PORT}
@@ -90,9 +116,13 @@ services:
     environment:
       SIGNER_HOST: 0.0.0.0
       SIGNER_PORT: 8080
+      SUBTENSOR_GATEWAY_URL: http://subtensor-gateway:8090
 
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets:ro
+    depends_on:
+      subtensor-gateway:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
       interval: 10s

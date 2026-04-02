@@ -1,7 +1,35 @@
 # ---- Prometheus ----
 import os
-from pathlib import Path
-from prometheus_client import Counter, Gauge, CollectorRegistry, start_http_server
+
+try:
+    from prometheus_client import Counter, Gauge, CollectorRegistry, start_http_server
+    _PROMETHEUS_AVAILABLE = True
+except ModuleNotFoundError:
+    _PROMETHEUS_AVAILABLE = False
+
+    class _NoopMetric:
+        def labels(self, **_kwargs):
+            return self
+
+        def inc(self, *_args, **_kwargs):
+            return None
+
+        def set(self, *_args, **_kwargs):
+            return None
+
+    def Counter(*_args, **_kwargs):
+        return _NoopMetric()
+
+    def Gauge(*_args, **_kwargs):
+        return _NoopMetric()
+
+    class CollectorRegistry:  # pragma: no cover - trivial fallback
+        def __init__(self, *args, **kwargs):
+            pass
+
+    def start_http_server(*_args, **_kwargs):
+        return None
+
 from babelbit.utils.settings import get_settings
 
 settings = get_settings()
@@ -34,6 +62,8 @@ CACHE_FILES = Gauge("cache_files", "Cached shard jsonl files", registry=PROM_REG
 
 def _start_metrics():
     try:
+        if not _PROMETHEUS_AVAILABLE:
+            return
         port = int(os.getenv("BABELBIT_METRICS_PORT", "8010"))
         addr = os.getenv("BABELBIT_METRICS_ADDR", "0.0.0.0")
         start_http_server(port, addr, registry=PROM_REG)

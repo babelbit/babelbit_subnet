@@ -43,95 +43,50 @@ def mock_wallet():
     return wallet
 
 
-@pytest.fixture
-def mock_successful_subtensor(mock_wallet):
-    """Mock subtensor that always succeeds"""
-    mock_st = AsyncMock()
-    mock_st.get_current_block = AsyncMock(return_value=1000)
-    mock_st.set_weights = AsyncMock(return_value=True)
-    mock_st.wait_for_block = AsyncMock()
-    
-    mock_meta = Mock()
-    mock_meta.hotkeys = [mock_wallet.hotkey.ss58_address]
-    mock_meta.last_update = [1001]
-    mock_st.metagraph = AsyncMock(return_value=mock_meta)
-    mock_st.close = AsyncMock()
-    
-    return mock_st
-
-
-@pytest.fixture
-def mock_failing_subtensor():
-    """Mock subtensor that always fails"""
-    mock_st = AsyncMock()
-    mock_st.get_current_block = AsyncMock(return_value=1000)
-    mock_st.set_weights = AsyncMock(return_value=False)
-    mock_st.wait_for_block = AsyncMock()
-    mock_st.close = AsyncMock()
-    return mock_st
-
-
 # ============================================================================
-# Test Category 1: Subtensor Lifecycle Management
+# Test Category 1: Gateway lifecycle management
 # ============================================================================
 
 class TestSubtensorLifecycle:
-    """Test subtensor connection management and caching"""
+    """Test gateway call behavior used by signer."""
     
     @pytest.mark.asyncio
-    async def test_subtensor_reused_across_retries(self, mock_wallet, mock_failing_subtensor):
-        """
-        Verify subtensor instance is cached and reused across retries.
-        This ensures we're not creating new instances unnecessarily.
-        """
-        subtensor_instances = []
-        
-        async def track_get_subtensor():
-            subtensor_instances.append(id(mock_failing_subtensor))
-            return mock_failing_subtensor
-        
-        with patch('babelbit.cli.signer_api.get_subtensor', side_effect=track_get_subtensor):
-            with patch('babelbit.cli.signer_api.reset_subtensor', AsyncMock()):
-                await _set_weights_with_confirmation(
-                    wallet=mock_wallet,
-                    netuid=59,
-                    uids=[1],
-                    weights=[1.0],
-                    wait_for_inclusion=False,
-                    retries=3,
-                    delay_s=0.01,
-                    log_prefix="[test]"
-                )
-        
-        # get_subtensor called 3 times (once per retry)
-        assert len(subtensor_instances) == 3
-        # But returns same cached instance
-        assert len(set(subtensor_instances)) == 1, "Should reuse cached subtensor"
+    async def test_gateway_called_once(self, mock_wallet):
+        """Signer should delegate one request to gateway for each operation."""
+        with patch(
+            "babelbit.cli.signer_api.SubtensorGatewayClient.set_weights_and_confirm",
+            new=AsyncMock(return_value=True),
+        ) as call:
+            ok = await _set_weights_with_confirmation(
+                wallet=mock_wallet,
+                netuid=59,
+                uids=[1],
+                weights=[1.0],
+                wait_for_inclusion=False,
+                retries=3,
+                delay_s=0.01,
+                log_prefix="[test]",
+            )
+        assert ok is True
+        call.assert_awaited_once()
     
     @pytest.mark.asyncio
-    async def test_single_subtensor_on_success(self, mock_wallet, mock_successful_subtensor):
-        """Verify only one subtensor instance created on immediate success"""
-        subtensor_instances = []
-        
-        def create_subtensor():
-            subtensor_instances.append(mock_successful_subtensor)
-            return mock_successful_subtensor
-        
-        with patch('babelbit.cli.signer_api.get_subtensor', side_effect=create_subtensor):
-            with patch('babelbit.cli.signer_api.reset_subtensor', AsyncMock()):
-                result = await _set_weights_with_confirmation(
-                    wallet=mock_wallet,
-                    netuid=59,
-                    uids=[1, 2, 3],
-                    weights=[0.33, 0.33, 0.34],
-                    wait_for_inclusion=False,
-                    retries=3,
-                    delay_s=0.01,
-                    log_prefix="[test]"
-                )
-        
-        assert len(subtensor_instances) == 1, "Should only create one subtensor on success"
-        assert result is True
+    async def test_gateway_failure_returns_false(self, mock_wallet):
+        with patch(
+            "babelbit.cli.signer_api.SubtensorGatewayClient.set_weights_and_confirm",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            result = await _set_weights_with_confirmation(
+                wallet=mock_wallet,
+                netuid=59,
+                uids=[1, 2, 3],
+                weights=[0.33, 0.33, 0.34],
+                wait_for_inclusion=False,
+                retries=3,
+                delay_s=0.01,
+                log_prefix="[test]",
+            )
+        assert result is False
 
 
 # ============================================================================
@@ -350,41 +305,27 @@ class TestProductionWorkloads:
         snapshot1 = tracemalloc.take_snapshot()
         
         call_count = 0
-        
-        def create_subtensor():
+
+        async def fake_gateway(*args, **kwargs):
             nonlocal call_count
             call_count += 1
-            
-            mock_st = AsyncMock()
-            mock_st.get_current_block = AsyncMock(return_value=1000 + call_count)
-            
-            # Sometimes succeeds, sometimes fails
-            if call_count % 3 == 0:
-                mock_st.set_weights = AsyncMock(return_value=True)
-                mock_st.wait_for_block = AsyncMock()
-                mock_meta = Mock()
-                mock_meta.hotkeys = [mock_wallet.hotkey.ss58_address]
-                mock_meta.last_update = [1001 + call_count]
-                mock_st.metagraph = AsyncMock(return_value=mock_meta)
-            else:
-                mock_st.set_weights = AsyncMock(return_value=False)
-            
-            mock_st.close = AsyncMock()
-            return mock_st
-        
-        with patch('babelbit.cli.signer_api.get_subtensor', side_effect=create_subtensor):
-            with patch('babelbit.cli.signer_api.reset_subtensor', AsyncMock()):
-                for _ in range(50):
-                    await _set_weights_with_confirmation(
-                        wallet=mock_wallet,
-                        netuid=59,
-                        uids=[1, 2, 3],
-                        weights=[0.33, 0.33, 0.34],
-                        wait_for_inclusion=False,
-                        retries=2,
-                        delay_s=0.001,
-                        log_prefix="[test]"
-                    )
+            return call_count % 3 == 0
+
+        with patch(
+            "babelbit.cli.signer_api.SubtensorGatewayClient.set_weights_and_confirm",
+            new=AsyncMock(side_effect=fake_gateway),
+        ):
+            for _ in range(50):
+                await _set_weights_with_confirmation(
+                    wallet=mock_wallet,
+                    netuid=59,
+                    uids=[1, 2, 3],
+                    weights=[0.33, 0.33, 0.34],
+                    wait_for_inclusion=False,
+                    retries=2,
+                    delay_s=0.001,
+                    log_prefix="[test]",
+                )
         
         gc.collect()
         snapshot2 = tracemalloc.take_snapshot()
@@ -439,7 +380,7 @@ class TestMemoryLeakMitigation:
             assert custom == 50, "Should respect env override"
     
     @pytest.mark.asyncio
-    async def test_periodic_reset_logic(self, mock_wallet, mock_successful_subtensor):
+    async def test_periodic_reset_logic(self, mock_wallet):
         """
         Test the logic for periodic reset (without full handler integration).
         Verifies reset is called at correct intervals.
@@ -450,26 +391,28 @@ class TestMemoryLeakMitigation:
         
         async def mock_reset():
             reset_calls.append(operation_count)
-        
-        with patch('babelbit.cli.signer_api.get_subtensor', return_value=mock_successful_subtensor):
-            with patch('babelbit.cli.signer_api.reset_subtensor', side_effect=mock_reset):
-                for i in range(15):
-                    await _set_weights_with_confirmation(
-                        wallet=mock_wallet,
-                        netuid=59,
-                        uids=[1],
-                        weights=[1.0],
-                        wait_for_inclusion=False,
-                        retries=1,
-                        delay_s=0.001,
-                        log_prefix="[test]"
-                    )
-                    
-                    operation_count += 1
-                    
-                    # Simulate handler logic
-                    if operation_count % reset_interval == 0:
-                        await mock_reset()
+
+        with patch(
+            "babelbit.cli.signer_api.SubtensorGatewayClient.set_weights_and_confirm",
+            new=AsyncMock(return_value=True),
+        ):
+            for i in range(15):
+                await _set_weights_with_confirmation(
+                    wallet=mock_wallet,
+                    netuid=59,
+                    uids=[1],
+                    weights=[1.0],
+                    wait_for_inclusion=False,
+                    retries=1,
+                    delay_s=0.001,
+                    log_prefix="[test]",
+                )
+
+                operation_count += 1
+
+                # Simulate handler logic
+                if operation_count % reset_interval == 0:
+                    await mock_reset()
         
         # Should have 3 resets (at 5, 10, 15)
         assert len(reset_calls) == 3, \
