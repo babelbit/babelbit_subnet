@@ -123,7 +123,7 @@ def get_settings() -> Settings:
         BB_ENABLE_ARENA_CHALLENGE=getenv("BB_ENABLE_ARENA_CHALLENGE", "true").strip().lower() in ("1", "true", "yes"),
         BB_ARENA_CADENCE_BLOCKS=int(getenv("BB_ARENA_CADENCE_BLOCKS", "300")),
         BB_ARENA_RUN_ON_STARTUP=getenv("BB_ARENA_RUN_ON_STARTUP", "false").strip().lower() in ("1", "true", "yes"),
-        BB_ARENA_GATEWAY_URL=getenv("BB_ARENA_GATEWAY_URL", "https:/gw.babelbit.ai/"),
+        BB_ARENA_GATEWAY_URL=getenv("BB_ARENA_GATEWAY_URL", "https://gw.babelbit.ai/"),
         BB_ARENA_CONTAINERS_API_PATH=getenv("BB_ARENA_CONTAINERS_API_PATH", "/list_arena_miners"),
         BB_ARENA_CONTAINERS_STATUS=getenv("BB_ARENA_CONTAINERS_STATUS", "running"),
         BB_ARENA_CONTAINERS_WINDOW_SECONDS=int(getenv("BB_ARENA_CONTAINERS_WINDOW_SECONDS", "300")),
