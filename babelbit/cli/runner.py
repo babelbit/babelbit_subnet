@@ -16,20 +16,26 @@ import asyncio
 import time
 import traceback
 from urllib.parse import urlparse, urlunparse
-from aiohttp import ClientTimeout
+from aiohttp import ClientError, ClientTimeout
 
 from babelbit.utils.s3_manager import S3Manager
 from babelbit.utils.settings import get_settings
 
 from babelbit.utils.predict_utterances import (
-    get_current_challenge_uid, 
+    get_current_challenge_uid,
     predict_with_utterance_engine_multi_miner,
 )
-from babelbit.utils.utterance_auth import init_utterance_auth, authenticate_utterance_engine
+from babelbit.utils.utterance_auth import (
+    init_utterance_auth,
+    authenticate_utterance_engine,
+)
 from babelbit.utils.async_clients import close_http_clients, get_async_client
 
 from babelbit.utils.miner_registry import get_miners_from_registry, Miner
-from babelbit.utils.managed_container_registry import ManagedRoute, resolve_round2_routes
+from babelbit.utils.managed_container_registry import (
+    ManagedRoute,
+    resolve_round2_routes,
+)
 from babelbit.utils.subtensor_gateway_client import (
     SubtensorGatewayClient,
     close_gateway_clients,
@@ -74,6 +80,12 @@ def _close_http_clients_if_allowed(*, caller: str) -> None:
     close_http_clients()
 
 
+def _is_expected_subtensor_connection_error(exc: Exception) -> bool:
+    return isinstance(
+        exc, (ClientError, ConnectionError, OSError, TimeoutError, asyncio.TimeoutError)
+    )
+
+
 def _env_flag(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -105,7 +117,9 @@ def _get_runner_build_info() -> str:
             text=True,
         ).stdout.strip()
         state = "dirty" if dirty else "clean"
-        return f"branch={branch or 'unknown'} commit={commit or 'unknown'} state={state}"
+        return (
+            f"branch={branch or 'unknown'} commit={commit or 'unknown'} state={state}"
+        )
     except Exception as e:
         return f"branch=unknown commit=unknown state=unavailable({type(e).__name__})"
 
@@ -185,7 +199,9 @@ def _resolve_score_parallelism() -> int:
 
 def _resolve_score_io_parallelism(score_parallelism: int) -> int:
     try:
-        configured = int(os.getenv("BB_SCORE_IO_PARALLELISM", str(max(2, score_parallelism))))
+        configured = int(
+            os.getenv("BB_SCORE_IO_PARALLELISM", str(max(2, score_parallelism)))
+        )
     except Exception:
         configured = max(2, score_parallelism)
     return max(1, configured)
@@ -231,10 +247,15 @@ def _init_scoring_worker(torch_threads: int) -> None:
         pass
 
 
-def _get_scoring_process_pool(*, max_workers: int, torch_threads: int) -> ProcessPoolExecutor:
+def _get_scoring_process_pool(
+    *, max_workers: int, torch_threads: int
+) -> ProcessPoolExecutor:
     global _SCORING_PROCESS_POOL, _SCORING_PROCESS_POOL_CONFIG
     desired_config = (max_workers, torch_threads)
-    if _SCORING_PROCESS_POOL is not None and _SCORING_PROCESS_POOL_CONFIG == desired_config:
+    if (
+        _SCORING_PROCESS_POOL is not None
+        and _SCORING_PROCESS_POOL_CONFIG == desired_config
+    ):
         return _SCORING_PROCESS_POOL
 
     if _SCORING_PROCESS_POOL is not None:
@@ -279,35 +300,46 @@ def _track_background_task(task: asyncio.Task, *, label: str) -> None:
             logger.info("[runner] background task cancelled: %s", label)
             return
         except Exception as e:
-            logger.warning("[runner] background task inspection failed for %s: %s", label, e)
+            logger.warning(
+                "[runner] background task inspection failed for %s: %s", label, e
+            )
             return
         if exc is not None:
-            logger.warning("[runner] background task failed (%s): %s: %s", label, type(exc).__name__, exc)
+            logger.warning(
+                "[runner] background task failed (%s): %s: %s",
+                label,
+                type(exc).__name__,
+                exc,
+            )
 
     task.add_done_callback(_done_callback)
 
 
-def group_steps_into_utterances(utterance_steps: List[BBPredictedUtterance]) -> List[List[BBPredictedUtterance]]:
+def group_steps_into_utterances(
+    utterance_steps: List[BBPredictedUtterance],
+) -> List[List[BBPredictedUtterance]]:
     """
     Group utterance steps into complete utterances.
     Each utterance ends when done=True (EOF token).
     """
     complete_utterances = []
     current_utterance_steps = []
-    
+
     for step in utterance_steps:
         current_utterance_steps.append(step)
-        
+
         # If this step marks the end of an utterance (done=True/EOF)
         if step.done:
             complete_utterances.append(current_utterance_steps.copy())
             current_utterance_steps = []
-    
+
     # Handle any remaining steps that didn't form a complete utterance
     if current_utterance_steps:
-        logger.warning(f"Found {len(current_utterance_steps)} incomplete utterance steps at end of dialogue")
+        logger.warning(
+            f"Found {len(current_utterance_steps)} incomplete utterance steps at end of dialogue"
+        )
         complete_utterances.append(current_utterance_steps)
-    
+
     return complete_utterances
 
 
@@ -331,15 +363,16 @@ def _prepare_dialogue_score_artifacts(
         dialogue_uid,
     )
     complete_utterances = group_steps_into_utterances(utterance_steps)
-    logger.info("Dialogue %s contains %d complete utterances", dialogue_uid, len(complete_utterances))
+    logger.info(
+        "Dialogue %s contains %d complete utterances",
+        dialogue_uid,
+        len(complete_utterances),
+    )
 
     scoring_events: List[dict] = []
-    events_path = (
-        logs_dir
-        / (
-            f"dialogue_run_{challenge_uid or 'unknown'}_type_{challenge_type}"
-            f"_miner_{miner_uid}__hk_{miner_hotkey}__dlg_{dialogue_uid}.jsonl"
-        )
+    events_path = logs_dir / (
+        f"dialogue_run_{challenge_uid or 'unknown'}_type_{challenge_type}"
+        f"_miner_{miner_uid}__hk_{miner_hotkey}__dlg_{dialogue_uid}.jsonl"
     )
     with events_path.open("w", encoding="utf-8") as jf:
         for utt_index, utt_steps in enumerate(complete_utterances):
@@ -380,10 +413,15 @@ def _prepare_dialogue_score_artifacts(
             jf.write(json.dumps(complete_event) + "\n")
 
     logger.info("[runner] Wrote raw dialogue log: %s", events_path)
-    logger.debug("[runner] events_path size=%d bytes", events_path.stat().st_size if events_path.exists() else -1)
+    logger.debug(
+        "[runner] events_path size=%d bytes",
+        events_path.stat().st_size if events_path.exists() else -1,
+    )
 
     if score_jsonl is None:
-        logger.warning("score_jsonl unavailable; skipping scoring for dialogue %s", dialogue_uid)
+        logger.warning(
+            "score_jsonl unavailable; skipping scoring for dialogue %s", dialogue_uid
+        )
         return None
 
     try:
@@ -394,15 +432,21 @@ def _prepare_dialogue_score_artifacts(
             len(scored_doc.get("utterances", [])),
             dialogue_uid,
         )
-        scored_doc.update({
-            "challenge_uid": challenge_uid,
-            "challenge_type": challenge_type,
-            "miner_uid": miner_uid,
-            "miner_hotkey": miner_hotkey,
-            "dialogue_uid": dialogue_uid,
-        })
-        avg_u = float(scored_doc.get("dialogue_summary", {}).get("average_U_best_early", 0.0))
-        score_path = Path(save_dialogue_score_file(scored_doc, output_dir=str(scores_dir)))
+        scored_doc.update(
+            {
+                "challenge_uid": challenge_uid,
+                "challenge_type": challenge_type,
+                "miner_uid": miner_uid,
+                "miner_hotkey": miner_hotkey,
+                "dialogue_uid": dialogue_uid,
+            }
+        )
+        avg_u = float(
+            scored_doc.get("dialogue_summary", {}).get("average_U_best_early", 0.0)
+        )
+        score_path = Path(
+            save_dialogue_score_file(scored_doc, output_dir=str(scores_dir))
+        )
         logger.info("[runner] Scored dialogue %s U=%.4f", dialogue_uid, avg_u)
         return {
             "challenge_uid": challenge_uid,
@@ -457,12 +501,21 @@ async def _score_miners_for_challenge(
     score_worker_threads = _resolve_score_worker_threads(score_parallelism)
     dialogue_semaphore = asyncio.Semaphore(score_parallelism)
     io_semaphore = asyncio.Semaphore(io_parallelism)
-    scoring_pool = _get_scoring_process_pool(
-        max_workers=score_parallelism,
-        torch_threads=score_worker_threads,
-    ) if _should_use_scoring_process_pool() else None
+    scoring_pool = (
+        _get_scoring_process_pool(
+            max_workers=score_parallelism,
+            torch_threads=score_worker_threads,
+        )
+        if _should_use_scoring_process_pool()
+        else None
+    )
 
-    async def _process_dialogue(miner: Miner, dialogue_index: int, dialogue_uid: str, utterance_steps: List[BBPredictedUtterance]) -> Optional[Dict[str, object]]:
+    async def _process_dialogue(
+        miner: Miner,
+        dialogue_index: int,
+        dialogue_uid: str,
+        utterance_steps: List[BBPredictedUtterance],
+    ) -> Optional[Dict[str, object]]:
         nonlocal scoring_pool
         async with dialogue_semaphore:
             if scoring_pool is not None:
@@ -475,7 +528,9 @@ async def _score_miners_for_challenge(
                     "miner_uid": getattr(miner, "uid", None),
                     "miner_hotkey": getattr(miner, "hotkey", None),
                     "dialogue_uid": dialogue_uid,
-                    "utterance_steps": [_serialize_prediction_step(step) for step in utterance_steps],
+                    "utterance_steps": [
+                        _serialize_prediction_step(step) for step in utterance_steps
+                    ],
                 }
                 try:
                     artifact = await loop.run_in_executor(
@@ -530,8 +585,14 @@ async def _score_miners_for_challenge(
         async with io_semaphore:
             if active_s3_manager:
                 s3_log_path = f"{settings.S3_LOG_DIR}/logs/{events_path.name}"
-                await asyncio.to_thread(active_s3_manager.upload_file, str(events_path), s3_log_path)
-                logger.info("Uploaded raw dialogue log to S3: s3://%s/%s", active_s3_manager.bucket_name, s3_log_path)
+                await asyncio.to_thread(
+                    active_s3_manager.upload_file, str(events_path), s3_log_path
+                )
+                logger.info(
+                    "Uploaded raw dialogue log to S3: s3://%s/%s",
+                    active_s3_manager.bucket_name,
+                    s3_log_path,
+                )
 
             if submission_client.is_ready:
                 max_attempts = 4
@@ -551,7 +612,11 @@ async def _score_miners_for_challenge(
                         )
                     except Exception as e:
                         ok = False
-                        logger.warning("Validation submission error for %s: %s", events_path.name, e)
+                        logger.warning(
+                            "Validation submission error for %s: %s",
+                            events_path.name,
+                            e,
+                        )
                     if ok:
                         break
                     if attempt < max_attempts:
@@ -567,8 +632,14 @@ async def _score_miners_for_challenge(
 
             if active_s3_manager:
                 s3_score_path = f"submissions/{score_path.name}"
-                await asyncio.to_thread(active_s3_manager.upload_file, str(score_path), s3_score_path)
-                logger.info("Uploaded dialogue score to S3: s3://%s/%s", active_s3_manager.bucket_name, s3_score_path)
+                await asyncio.to_thread(
+                    active_s3_manager.upload_file, str(score_path), s3_score_path
+                )
+                logger.info(
+                    "Uploaded dialogue score to S3: s3://%s/%s",
+                    active_s3_manager.bucket_name,
+                    s3_score_path,
+                )
 
             if submission_client.is_ready:
                 try:
@@ -585,7 +656,9 @@ async def _score_miners_for_challenge(
                         extra_data={"challenge_type": artifact_challenge_type},
                     )
                 except Exception as e:
-                    logger.warning("Validation submission error for %s: %s", score_path, e)
+                    logger.warning(
+                        "Validation submission error for %s: %s", score_path, e
+                    )
 
         return artifact
 
@@ -603,7 +676,12 @@ async def _score_miners_for_challenge(
             )
 
             if not dialogues:
-                logger.warning("Miner %s (uid: %s, hotkey: %s...) has no dialogues to score", miner_id, m.uid, m.hotkey[:16])
+                logger.warning(
+                    "Miner %s (uid: %s, hotkey: %s...) has no dialogues to score",
+                    miner_id,
+                    m.uid,
+                    m.hotkey[:16],
+                )
                 return 0, 0, None
 
             has_valid_predictions = False
@@ -623,7 +701,9 @@ async def _score_miners_for_challenge(
                     m.uid,
                     len(dialogues),
                 )
-                logger.debug("[runner] miner %s invalid/empty predictions; skipping", miner_id)
+                logger.debug(
+                    "[runner] miner %s invalid/empty predictions; skipping", miner_id
+                )
                 return 0, 0, None
 
             logger.info(
@@ -635,8 +715,12 @@ async def _score_miners_for_challenge(
             )
 
             dialogue_results: List[Dict[str, object]] = []
-            for dialogue_index, (dialogue_uid, utterance_steps) in enumerate(dialogues.items()):
-                result = await _process_dialogue(m, dialogue_index, dialogue_uid, utterance_steps)
+            for dialogue_index, (dialogue_uid, utterance_steps) in enumerate(
+                dialogues.items()
+            ):
+                result = await _process_dialogue(
+                    m, dialogue_index, dialogue_uid, utterance_steps
+                )
                 if result is not None:
                     dialogue_results.append(result)
 
@@ -654,12 +738,20 @@ async def _score_miners_for_challenge(
                 "miner_uid": getattr(m, "uid", None),
                 "miner_hotkey": getattr(m, "hotkey", None),
                 "dialogues": [
-                    {"dialogue_uid": duid, "dialogue_average_u_best_early": ds, "dialogue_index": idx}
-                    for idx, (duid, ds) in enumerate(zip(dialogue_uids, dialogue_scores))
+                    {
+                        "dialogue_uid": duid,
+                        "dialogue_average_u_best_early": ds,
+                        "dialogue_index": idx,
+                    }
+                    for idx, (duid, ds) in enumerate(
+                        zip(dialogue_uids, dialogue_scores)
+                    )
                 ],
                 "challenge_mean_U": miner_mean_score,
             }
-            summary_path = save_challenge_summary_file(summary, output_dir=str(scores_dir))
+            summary_path = save_challenge_summary_file(
+                summary, output_dir=str(scores_dir)
+            )
             logger.debug(
                 "[runner] saved challenge summary for miner %s: path=%s dialogues=%d mean=%.4f",
                 miner_id,
@@ -672,8 +764,14 @@ async def _score_miners_for_challenge(
             async with io_semaphore:
                 if active_s3_manager:
                     s3_sub_path = f"submissions/{Path(summary_path).name}"
-                    await asyncio.to_thread(active_s3_manager.upload_file, str(summary_path), s3_sub_path)
-                    logger.info("Uploaded challenge summary to S3: s3://%s/%s", active_s3_manager.bucket_name, s3_sub_path)
+                    await asyncio.to_thread(
+                        active_s3_manager.upload_file, str(summary_path), s3_sub_path
+                    )
+                    logger.info(
+                        "Uploaded challenge summary to S3: s3://%s/%s",
+                        active_s3_manager.bucket_name,
+                        s3_sub_path,
+                    )
                 if submission_client.is_ready:
                     try:
                         await submission_client.submit_validation_file(
@@ -689,9 +787,16 @@ async def _score_miners_for_challenge(
                             extra_data={"challenge_type": artifact_challenge_type},
                         )
                     except Exception as e:
-                        logger.warning("Validation submission error for %s: %s", summary_path, e)
+                        logger.warning(
+                            "Validation submission error for %s: %s", summary_path, e
+                        )
 
-            logger.debug("[runner] challenge processed: uid=%s miners=1 dialogues=%d mean=%s", challenge_uid, len(dialogue_scores), f"{miner_mean_score:.4f}")
+            logger.debug(
+                "[runner] challenge processed: uid=%s miners=1 dialogues=%d mean=%s",
+                challenge_uid,
+                len(dialogue_scores),
+                f"{miner_mean_score:.4f}",
+            )
             return 1, len(dialogue_scores), miner_mean_score
         except Exception as e:
             logger.warning(
@@ -705,7 +810,9 @@ async def _score_miners_for_challenge(
     miner_results = await asyncio.gather(*(_process_miner(m) for m in miner_list))
     total_miners_processed = sum(result[0] for result in miner_results)
     total_dialogues_processed = sum(result[1] for result in miner_results)
-    all_challenge_scores = [result[2] for result in miner_results if result[2] is not None]
+    all_challenge_scores = [
+        result[2] for result in miner_results if result[2] is not None
+    ]
     return total_miners_processed, total_dialogues_processed, all_challenge_scores
 
 
@@ -730,7 +837,9 @@ async def _run_solo_challenge_phase(
     try:
         from babelbit.utils.predict_engine import call_miner_axon_endpoint
 
-        async def prediction_callback(miner: Miner, payload: BBPredictedUtterance, context: str) -> str:
+        async def prediction_callback(
+            miner: Miner, payload: BBPredictedUtterance, context: str
+        ) -> str:
             if miner.axon_ip and miner.axon_port:
                 result = await call_miner_axon_endpoint(
                     axon_ip=miner.axon_ip,
@@ -743,9 +852,15 @@ async def _run_solo_challenge_phase(
                 if result.success and result.utterance:
                     return result.utterance.prediction or ""
                 raise RuntimeError(str(result.error))
-            raise RuntimeError(f"Miner {getattr(miner, 'uid', '?')} has no axon endpoint available")
+            raise RuntimeError(
+                f"Miner {getattr(miner, 'uid', '?')} has no axon endpoint available"
+            )
 
-        solo_dialogues, solo_uid, solo_status = await predict_with_utterance_engine_multi_miner(
+        (
+            solo_dialogues,
+            solo_uid,
+            solo_status,
+        ) = await predict_with_utterance_engine_multi_miner(
             utterance_engine_url=utterance_engine_url,
             miners=miner_list,
             prediction_callback=prediction_callback,
@@ -769,15 +884,23 @@ async def _run_solo_challenge_phase(
         return
 
     if not solo_results:
-        logger.info("[Solo Challenge] No solo challenge results returned; skipping solo scoring")
+        logger.info(
+            "[Solo Challenge] No solo challenge results returned; skipping solo scoring"
+        )
         return
 
     solo_uid = next(
-        (result.get("challenge_uid") for result in solo_results.values() if result.get("challenge_uid")),
+        (
+            result.get("challenge_uid")
+            for result in solo_results.values()
+            if result.get("challenge_uid")
+        ),
         None,
     )
     if not solo_uid:
-        logger.warning("[Solo Challenge] No challenge UID available in solo results; skipping scoring")
+        logger.warning(
+            "[Solo Challenge] No challenge UID available in solo results; skipping scoring"
+        )
         return
 
     solo_miner_list: List[Miner] = []
@@ -807,13 +930,19 @@ async def _run_solo_challenge_phase(
         logger.info("[Solo Challenge] No miners processed during solo phase")
         return
 
-    score_embedder_prewarm_task = asyncio.create_task(asyncio.to_thread(prewarm_score_dialogue_embedder))
+    score_embedder_prewarm_task = asyncio.create_task(
+        asyncio.to_thread(prewarm_score_dialogue_embedder)
+    )
     try:
         await score_embedder_prewarm_task
     except Exception as e:
         logger.warning("[Solo Challenge] Score embedder prewarm failed: %s", e)
 
-    solo_total_miners, solo_total_dialogues, solo_scores = await _score_miners_for_challenge(
+    (
+        solo_total_miners,
+        solo_total_dialogues,
+        solo_scores,
+    ) = await _score_miners_for_challenge(
         challenge_uid=solo_uid,
         challenge_type="solo",
         miner_list=solo_miner_list,
@@ -877,10 +1006,14 @@ def _build_round2_prediction_callback(
         )
         return any(lowered.startswith(prefix) for prefix in non_retryable_prefixes)
 
-    async def prediction_callback(miner: Miner, payload: BBPredictedUtterance, context: str) -> str:
+    async def prediction_callback(
+        miner: Miner, payload: BBPredictedUtterance, context: str
+    ) -> str:
         route = routes_by_hotkey.get(getattr(miner, "hotkey", ""))
         miner_uid = getattr(miner, "uid", "?")
-        miner_hotkey_short = (miner.hotkey[:16] + "...") if getattr(miner, "hotkey", None) else "?"
+        miner_hotkey_short = (
+            (miner.hotkey[:16] + "...") if getattr(miner, "hotkey", None) else "?"
+        )
         step_value = getattr(payload, "step", "?")
         miner_hotkey = getattr(miner, "hotkey", "") or ""
         is_startup_call = miner_hotkey not in first_call_seen
@@ -893,7 +1026,9 @@ def _build_round2_prediction_callback(
 
         started_at = time.perf_counter()
         prefix_chars = len((getattr(payload, "prefix", "") or ""))
-        provider = str(getattr(route, "provider", "managed_container") or "managed_container")
+        provider = str(
+            getattr(route, "provider", "managed_container") or "managed_container"
+        )
         route_target = str(getattr(route, "endpoint_url", "") or "")
         _trace_miner_call(
             f"arena-start uid={miner_uid} hotkey={miner_hotkey_short} provider={provider} target={route_target} step={step_value} timeout={effective_timeout:.2f}s startup_retry_timeout={startup_timeout:.2f}s startup_request_timeout={startup_request_timeout:.2f}s prefix_chars={prefix_chars}",
@@ -914,7 +1049,9 @@ def _build_round2_prediction_callback(
                         payload=payload,
                         context_used=context,
                         miner_hotkey=miner.hotkey,
-                        timeout=min(float(startup_request_timeout), max(0.1, remaining)),
+                        timeout=min(
+                            float(startup_request_timeout), max(0.1, remaining)
+                        ),
                     )
                     prediction_text = ""
                     if result.utterance:
@@ -937,7 +1074,9 @@ def _build_round2_prediction_callback(
                         startup_attempt,
                         last_error,
                     )
-                    await asyncio.sleep(min(1.0, max(0.0, startup_deadline - time.monotonic())))
+                    await asyncio.sleep(
+                        min(1.0, max(0.0, startup_deadline - time.monotonic()))
+                    )
             else:
                 result = await call_managed_route_endpoint(
                     route=route,
@@ -1026,7 +1165,9 @@ async def _wait_for_round2_routes_health(
             skipped_health_probe += 1
 
     if skipped_health_probe:
-        logger.info("Arena health gate bypassed for %d provider route(s)", skipped_health_probe)
+        logger.info(
+            "Arena health gate bypassed for %d provider route(s)", skipped_health_probe
+        )
 
     while pending and time.monotonic() < deadline:
         attempt += 1
@@ -1036,7 +1177,9 @@ async def _wait_for_round2_routes_health(
             if not health_url:
                 return hotkey, False, "empty_health_url"
             try:
-                async with session.get(health_url, timeout=ClientTimeout(total=timeout)) as response:
+                async with session.get(
+                    health_url, timeout=ClientTimeout(total=timeout)
+                ) as response:
                     if response.status == 200:
                         return hotkey, True, ""
                     body = (await response.text())[:120]
@@ -1076,14 +1219,26 @@ async def _wait_for_round2_routes_health(
     return healthy, unresolved
 
 
-async def runner(utterance_engine_url: str | None = None, output_dir: Optional[str] = None, subtensor=None) -> None:
+async def runner(
+    utterance_engine_url: str | None = None,
+    output_dir: Optional[str] = None,
+    subtensor=None,
+) -> None:
     _enforce_runner_logging_level()
     settings = get_settings()
     NETUID = settings.BABELBIT_NETUID
     MAX_MINERS = int(os.getenv("BB_MAX_MINERS_PER_RUN", "256"))
-    utterance_engine_url = utterance_engine_url or os.getenv("BB_UTTERANCE_ENGINE_URL", "http://localhost:8000")
-    enable_solo_challenge = os.getenv("BB_ENABLE_SOLO_CHALLENGE", "1").lower() in {"1", "true", "yes"}
-    startup_context = _format_runner_startup_context(version=getattr(settings, "BABELBIT_VERSION", None))
+    utterance_engine_url = utterance_engine_url or os.getenv(
+        "BB_UTTERANCE_ENGINE_URL", "http://localhost:8000"
+    )
+    enable_solo_challenge = os.getenv("BB_ENABLE_SOLO_CHALLENGE", "1").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    startup_context = _format_runner_startup_context(
+        version=getattr(settings, "BABELBIT_VERSION", None)
+    )
     _stderr_boot(
         "runner entry "
         f"utterance_engine_url={utterance_engine_url} "
@@ -1092,7 +1247,7 @@ async def runner(utterance_engine_url: str | None = None, output_dir: Optional[s
         f"{startup_context}",
     )
     logger.info("[RunnerBoot] %s", startup_context)
-    
+
     # Determine directories:
     #   Raw logs:   ./logs (override with BB_OUTPUT_LOGS_DIR)
     #   Scores:     ./scores (override with BB_OUTPUT_SCORES_DIR or output_dir argument) produced after scoring
@@ -1103,7 +1258,9 @@ async def runner(utterance_engine_url: str | None = None, output_dir: Optional[s
     scores_dir.mkdir(parents=True, exist_ok=True)
     logger.debug(
         "[runner] output dirs ready: logs_dir=%s scores_dir=%s (output_dir_arg=%s)",
-        str(logs_dir), str(scores_dir), str(output_dir),
+        str(logs_dir),
+        str(scores_dir),
+        str(output_dir),
     )
 
     s3_enabled = os.getenv("BB_ENABLE_S3_UPLOADS", "0").lower() in {"1", "true", "yes"}
@@ -1123,9 +1280,13 @@ async def runner(utterance_engine_url: str | None = None, output_dir: Optional[s
             )
             logger.info("S3 Manager initialized (uploads enabled)")
         except Exception as e:
-            logger.warning("S3 Manager initialization failed; disabling S3 uploads: %s", e)
+            logger.warning(
+                "S3 Manager initialization failed; disabling S3 uploads: %s", e
+            )
             s3_manager = None
-    logger.debug("[runner] S3 uploads enabled=%s active=%s", s3_enabled, bool(s3_manager))
+    logger.debug(
+        "[runner] S3 uploads enabled=%s active=%s", s3_enabled, bool(s3_manager)
+    )
 
     submission_client = ValidationSubmissionClient()
     logger.debug(
@@ -1141,7 +1302,9 @@ async def runner(utterance_engine_url: str | None = None, output_dir: Optional[s
         _stderr_boot(f"runner challenge_uid fetch failed: {type(e).__name__}: {e}")
         logger.warning(f"Could not get current challenge ID: {e}")
         return
-    logger.debug("[runner] fetched challenge_uid=%s from %s", challenge_uid, utterance_engine_url)
+    logger.debug(
+        "[runner] fetched challenge_uid=%s from %s", challenge_uid, utterance_engine_url
+    )
 
     # Prevents runner loop from running multiple times a challenge
     if challenge_uid:
@@ -1161,8 +1324,13 @@ async def runner(utterance_engine_url: str | None = None, output_dir: Optional[s
             )
             return
         else:
-            logger.info(f"Challenge {challenge_uid}: No existing scores found, proceeding with miner evaluation")
-            logger.debug("[runner] already_processed=%s", list(already_processed) if already_processed else [])
+            logger.info(
+                f"Challenge {challenge_uid}: No existing scores found, proceeding with miner evaluation"
+            )
+            logger.debug(
+                "[runner] already_processed=%s",
+                list(already_processed) if already_processed else [],
+            )
 
     try:
         _stderr_boot("runner fetching miners from registry")
@@ -1175,7 +1343,9 @@ async def runner(utterance_engine_url: str | None = None, output_dir: Optional[s
             )
             return
         _stderr_boot(f"runner miners fetched count={len(miners)}")
-        logger.info(f"Found {len(miners)} eligible miners from registry: {list(miners.keys())}")
+        logger.info(
+            f"Found {len(miners)} eligible miners from registry: {list(miners.keys())}"
+        )
         if not miners:
             _stderr_boot("runner no eligible miners")
             logger.warning("No eligible miners found on-chain.")
@@ -1186,25 +1356,30 @@ async def runner(utterance_engine_url: str | None = None, output_dir: Optional[s
         miner_list = miner_list[: min(MAX_MINERS, len(miner_list))]
         logger.debug(
             "[runner] miners selected=%d (max=%d)",
-            len(miner_list), MAX_MINERS,
+            len(miner_list),
+            MAX_MINERS,
         )
 
         if not miner_list:
             logger.info("No miners to process after filtering")
             return
 
-        score_embedder_prewarm_task = asyncio.create_task(asyncio.to_thread(prewarm_score_dialogue_embedder))
+        score_embedder_prewarm_task = asyncio.create_task(
+            asyncio.to_thread(prewarm_score_dialogue_embedder)
+        )
 
         # Define prediction callback for all miners
         from babelbit.utils.predict_engine import call_miner_axon_endpoint
-        
+
         # Capture timeout value from settings before defining callback
         miner_timeout = _coerce_timeout_seconds(
             getattr(settings, "BB_MINER_TIMEOUT_SEC", None),
             default=10.0,
         )
-        
-        async def prediction_callback(miner: Miner, payload: BBPredictedUtterance, context: str) -> str:
+
+        async def prediction_callback(
+            miner: Miner, payload: BBPredictedUtterance, context: str
+        ) -> str:
             """
             Callback to get prediction from a single miner.
             Returns the prediction text or empty string on error.
@@ -1213,7 +1388,11 @@ async def runner(utterance_engine_url: str | None = None, output_dir: Optional[s
             if miner.axon_ip and miner.axon_port:
                 started_at = time.perf_counter()
                 miner_uid = getattr(miner, "uid", "?")
-                miner_hotkey_short = (miner.hotkey[:16] + "...") if getattr(miner, "hotkey", None) else "?"
+                miner_hotkey_short = (
+                    (miner.hotkey[:16] + "...")
+                    if getattr(miner, "hotkey", None)
+                    else "?"
+                )
                 step_value = getattr(payload, "step", "?")
                 prefix_chars = len((getattr(payload, "prefix", "") or ""))
                 _trace_miner_call(
@@ -1236,9 +1415,9 @@ async def runner(utterance_engine_url: str | None = None, output_dir: Optional[s
                         payload=payload,
                         context_used=context,
                         miner_hotkey=miner.hotkey,
-                        timeout=miner_timeout
+                        timeout=miner_timeout,
                     )
-                    
+
                     if result.success and result.utterance:
                         latency = time.perf_counter() - started_at
                         prediction_text = result.utterance.prediction or ""
@@ -1290,19 +1469,21 @@ async def runner(utterance_engine_url: str | None = None, output_dir: Optional[s
                 (miner.hotkey[:16] + "...") if getattr(miner, "hotkey", None) else "?",
             )
             raise RuntimeError(f"Miner {miner_uid} has no axon endpoint available")
-        
+
         logger.info(f"Starting shared utterance session for {len(miner_list)} miners")
         _stderr_boot(
             "runner predict begin "
             f"miners={len(miner_list)} timeout={miner_timeout:.2f}",
         )
-        
+
         # Get step block modulo from environment (default: 1 block)
         step_block_modulo = int(os.getenv("BB_STEP_BLOCK_MODULO", "0"))
         logger.debug(
-            "[runner] session params: timeout=%.2fs step_block_modulo=%d", miner_timeout, step_block_modulo
+            "[runner] session params: timeout=%.2fs step_block_modulo=%d",
+            miner_timeout,
+            step_block_modulo,
         )
-        
+
         miner_dialogues = await predict_with_utterance_engine_multi_miner(
             utterance_engine_url=utterance_engine_url,
             miners=miner_list,
@@ -1311,18 +1492,18 @@ async def runner(utterance_engine_url: str | None = None, output_dir: Optional[s
             continue_after_all_miners_deactivated=True,
             max_prediction_errors=5,
             subtensor=subtensor,
-            step_block_modulo=step_block_modulo
+            step_block_modulo=step_block_modulo,
         )
         _stderr_boot(
-            "runner predict end "
-            f"miners_with_dialogues={len(miner_dialogues or {})}",
+            f"runner predict end miners_with_dialogues={len(miner_dialogues or {})}",
         )
         try:
             miners_with_dialogues = len(miner_dialogues or {})
             total_dialogues = sum(len(v) for v in (miner_dialogues or {}).values())
             logger.debug(
                 "[runner] multi-miner collected: miners_with_dialogues=%d total_dialogues=%d",
-                miners_with_dialogues, total_dialogues,
+                miners_with_dialogues,
+                total_dialogues,
             )
         except Exception:
             pass
@@ -1332,7 +1513,11 @@ async def runner(utterance_engine_url: str | None = None, output_dir: Optional[s
         except Exception as e:
             logger.warning("Score embedder prewarm failed: %s", e)
 
-        total_miners_processed, total_dialogues_processed, all_challenge_scores = await _score_miners_for_challenge(
+        (
+            total_miners_processed,
+            total_dialogues_processed,
+            all_challenge_scores,
+        ) = await _score_miners_for_challenge(
             challenge_uid=challenge_uid,
             challenge_type="main",
             miner_list=miner_list,
@@ -1344,7 +1529,11 @@ async def runner(utterance_engine_url: str | None = None, output_dir: Optional[s
         )
 
         if challenge_uid and total_miners_processed > 0:
-            overall_mean = sum(all_challenge_scores) / len(all_challenge_scores) if all_challenge_scores else None
+            overall_mean = (
+                sum(all_challenge_scores) / len(all_challenge_scores)
+                if all_challenge_scores
+                else None
+            )
             mark_challenge_processed(
                 challenge_uid=challenge_uid,
                 miner_count=total_miners_processed,
@@ -1354,14 +1543,18 @@ async def runner(utterance_engine_url: str | None = None, output_dir: Optional[s
                 metadata={
                     "scores_dir": str(scores_dir),
                     "logs_dir": str(logs_dir),
-                }
+                },
             )
             logger.debug(
                 "[runner] challenge processed: uid=%s miners=%d dialogues=%d mean=%s",
-                challenge_uid, total_miners_processed, total_dialogues_processed,
+                challenge_uid,
+                total_miners_processed,
+                total_dialogues_processed,
                 (f"{overall_mean:.4f}" if overall_mean is not None else "N/A"),
             )
-            mean_score_str = f"{overall_mean:.4f}" if overall_mean is not None else "N/A"
+            mean_score_str = (
+                f"{overall_mean:.4f}" if overall_mean is not None else "N/A"
+            )
             logger.info(
                 f"Challenge {challenge_uid} completed: {total_miners_processed} miners, "
                 f"{total_dialogues_processed} dialogues, mean_score={mean_score_str}"
@@ -1388,7 +1581,10 @@ async def runner(utterance_engine_url: str | None = None, output_dir: Optional[s
                     )
                 )
                 _track_background_task(solo_phase_task, label=f"solo:{challenge_uid}")
-                logger.info("[Solo Challenge] Scheduled background solo phase for challenge %s", challenge_uid)
+                logger.info(
+                    "[Solo Challenge] Scheduled background solo phase for challenge %s",
+                    challenge_uid,
+                )
             else:
                 await _run_solo_challenge_phase(
                     utterance_engine_url=utterance_engine_url,
@@ -1402,9 +1598,11 @@ async def runner(utterance_engine_url: str | None = None, output_dir: Optional[s
                     active_s3_manager=s3_manager,
                 )
         else:
-            logger.debug("[runner] Solo challenge phase disabled via BB_ENABLE_SOLO_CHALLENGE")
+            logger.debug(
+                "[runner] Solo challenge phase disabled via BB_ENABLE_SOLO_CHALLENGE"
+            )
             _stderr_boot("runner solo challenge disabled")
-                
+
     except Exception as e:
         _stderr_boot(f"runner failed: {type(e).__name__}: {e}")
         try:
@@ -1416,12 +1614,18 @@ async def runner(utterance_engine_url: str | None = None, output_dir: Optional[s
         _close_http_clients_if_allowed(caller="runner")
 
 
-async def runner_round2(utterance_engine_url: str | None = None, output_dir: Optional[str] = None, subtensor=None) -> None:
+async def runner_round2(
+    utterance_engine_url: str | None = None,
+    output_dir: Optional[str] = None,
+    subtensor=None,
+) -> None:
     _enforce_runner_logging_level()
     settings = get_settings()
     NETUID = settings.BABELBIT_NETUID
     MAX_MINERS = int(os.getenv("BB_MAX_MINERS_PER_RUN", "256"))
-    utterance_engine_url = utterance_engine_url or os.getenv("BB_UTTERANCE_ENGINE_URL", "http://localhost:8000")
+    utterance_engine_url = utterance_engine_url or os.getenv(
+        "BB_UTTERANCE_ENGINE_URL", "http://localhost:8000"
+    )
     _stderr_boot(
         "runner arena entry "
         f"utterance_engine_url={utterance_engine_url} "
@@ -1450,7 +1654,9 @@ async def runner_round2(utterance_engine_url: str | None = None, output_dir: Opt
             )
             logger.info("S3 Manager initialized (uploads enabled)")
         except Exception as e:
-            logger.warning("S3 Manager initialization failed; disabling S3 uploads: %s", e)
+            logger.warning(
+                "S3 Manager initialization failed; disabling S3 uploads: %s", e
+            )
             s3_manager = None
 
     submission_client = ValidationSubmissionClient()
@@ -1459,7 +1665,9 @@ async def runner_round2(utterance_engine_url: str | None = None, output_dir: Opt
         challenge_uid = await get_current_challenge_uid(utterance_engine_url)
         _stderr_boot(f"runner arena challenge_uid={challenge_uid}")
     except Exception as e:
-        _stderr_boot(f"runner arena challenge_uid fetch failed: {type(e).__name__}: {e}")
+        _stderr_boot(
+            f"runner arena challenge_uid fetch failed: {type(e).__name__}: {e}"
+        )
         logger.warning("Could not get arena challenge ID: %s", e)
         return
 
@@ -1494,14 +1702,22 @@ async def runner_round2(utterance_engine_url: str | None = None, output_dir: Opt
 
         random.shuffle(arena_miners)
         arena_miners = arena_miners[: min(MAX_MINERS, len(arena_miners))]
-        routes_by_hotkey = {m.hotkey: routes_by_hotkey[m.hotkey] for m in arena_miners if m.hotkey in routes_by_hotkey}
+        routes_by_hotkey = {
+            m.hotkey: routes_by_hotkey[m.hotkey]
+            for m in arena_miners
+            if m.hotkey in routes_by_hotkey
+        }
 
         arena_timeout = _coerce_timeout_seconds(
             getattr(settings, "BB_ARENA_MINER_TIMEOUT_SEC", None),
-            default=_coerce_timeout_seconds(getattr(settings, "BB_MINER_TIMEOUT_SEC", None), default=10.0),
+            default=_coerce_timeout_seconds(
+                getattr(settings, "BB_MINER_TIMEOUT_SEC", None), default=10.0
+            ),
         )
         arena_startup_timeout = _resolve_arena_startup_timeout()
-        score_embedder_prewarm_task = asyncio.create_task(asyncio.to_thread(prewarm_score_dialogue_embedder))
+        score_embedder_prewarm_task = asyncio.create_task(
+            asyncio.to_thread(prewarm_score_dialogue_embedder)
+        )
         callback = _build_round2_prediction_callback(
             routes_by_hotkey=routes_by_hotkey,
             miner_timeout=arena_timeout,
@@ -1536,7 +1752,11 @@ async def runner_round2(utterance_engine_url: str | None = None, output_dir: Opt
         except Exception as e:
             logger.warning("Score embedder prewarm failed: %s", e)
 
-        total_miners_processed, total_dialogues_processed, all_challenge_scores = await _score_miners_for_challenge(
+        (
+            total_miners_processed,
+            total_dialogues_processed,
+            all_challenge_scores,
+        ) = await _score_miners_for_challenge(
             challenge_uid=challenge_uid,
             challenge_type="arena",
             miner_list=arena_miners,
@@ -1548,7 +1768,11 @@ async def runner_round2(utterance_engine_url: str | None = None, output_dir: Opt
         )
 
         if challenge_uid and total_miners_processed > 0:
-            overall_mean = sum(all_challenge_scores) / len(all_challenge_scores) if all_challenge_scores else None
+            overall_mean = (
+                sum(all_challenge_scores) / len(all_challenge_scores)
+                if all_challenge_scores
+                else None
+            )
             mark_challenge_processed(
                 challenge_uid=challenge_uid,
                 challenge_type="arena",
@@ -1561,7 +1785,9 @@ async def runner_round2(utterance_engine_url: str | None = None, output_dir: Opt
                     "route_source": "list_arena_miners",
                 },
             )
-            mean_score_str = f"{overall_mean:.4f}" if overall_mean is not None else "N/A"
+            mean_score_str = (
+                f"{overall_mean:.4f}" if overall_mean is not None else "N/A"
+            )
             _stderr_boot(
                 "runner arena challenge complete "
                 f"challenge_uid={challenge_uid} miners={total_miners_processed} "
@@ -1618,14 +1844,18 @@ async def runner_loop():
     last_successful_run = 0
     consecutive_failures = 0
     run_count = 0
-    
+
     # Initialize utterance engine authentication on startup
-    utterance_engine_url = os.getenv("BB_UTTERANCE_ENGINE_URL", "https://api.babelbit.ai")
+    utterance_engine_url = os.getenv(
+        "BB_UTTERANCE_ENGINE_URL", "https://api.babelbit.ai"
+    )
     wallet_name = os.getenv("BITTENSOR_WALLET_COLD", "default")
     hotkey_name = os.getenv("BITTENSOR_WALLET_HOT", "default")
-    
+
     init_utterance_auth(utterance_engine_url, wallet_name, hotkey_name)
-    startup_context = _format_runner_startup_context(version=getattr(settings, "BABELBIT_VERSION", None))
+    startup_context = _format_runner_startup_context(
+        version=getattr(settings, "BABELBIT_VERSION", None)
+    )
     _stderr_boot(
         "runner_loop start "
         f"BB_RUNNER_ON_STARTUP={os.getenv('BB_RUNNER_ON_STARTUP')} "
@@ -1647,7 +1877,7 @@ async def runner_loop():
         arena_cadence_blocks,
         arena_run_on_startup,
     )
-    
+
     # Authenticate with retry logic on startup
     try:
         logger.info("[RunnerLoop] Authenticating with utterance engine on startup...")
@@ -1686,13 +1916,19 @@ async def runner_loop():
                     try:
                         await reset_subtensor()  # Clear any stale cached connection
                         st = await asyncio.wait_for(get_subtensor(), timeout=60)
-                        logger.info("[RunnerLoop] Successfully created subtensor connection")
+                        logger.info(
+                            "[RunnerLoop] Successfully created subtensor connection"
+                        )
                         _stderr_boot("subtensor connected")
-                        
+
                         # Test the connection by fetching a block
-                        test_block = await asyncio.wait_for(st.get_current_block(), timeout=30)
-                        logger.info(f"[RunnerLoop] Connection verified at block {test_block}")
-                        
+                        test_block = await asyncio.wait_for(
+                            st.get_current_block(), timeout=30
+                        )
+                        logger.info(
+                            f"[RunnerLoop] Connection verified at block {test_block}"
+                        )
+
                     except asyncio.TimeoutError as te:
                         st = None  # Clear invalid connection
                         await reset_subtensor()  # Also clear the global cache
@@ -1700,7 +1936,11 @@ async def runner_loop():
                     except Exception as e:
                         st = None  # Clear invalid connection
                         await reset_subtensor()  # Also clear the global cache
-                        logger.error(f"[RunnerLoop] Subtensor connection failed: {type(e).__name__}: {e}", exc_info=True)
+                        log_message = f"[RunnerLoop] Subtensor connection failed: {type(e).__name__}: {e}"
+                        if _is_expected_subtensor_connection_error(e):
+                            logger.warning(log_message)
+                        else:
+                            logger.error(log_message, exc_info=True)
                         raise
 
                 # Try to get current block for tempo-based scheduling
@@ -1708,7 +1948,7 @@ async def runner_loop():
                 should_run_arena = False
                 block = None
                 use_time_fallback = False
-                
+
                 try:
                     block = await asyncio.wait_for(st.get_current_block(), timeout=30)
                     logger.debug(f"[RunnerLoop] Current block: {block}")
@@ -1717,22 +1957,31 @@ async def runner_loop():
                     auth_refresh_offset = TEMPO - min(100, max(1, TEMPO - 1))
                     if block % TEMPO == auth_refresh_offset:
                         try:
-                            logger.info(f"[RunnerLoop] Refreshing authentication at block {block} ({TEMPO - auth_refresh_offset} blocks before next run)")
+                            logger.info(
+                                f"[RunnerLoop] Refreshing authentication at block {block} ({TEMPO - auth_refresh_offset} blocks before next run)"
+                            )
                             await authenticate_utterance_engine()
-                            logger.info("[RunnerLoop] Authentication refresh successful")
+                            logger.info(
+                                "[RunnerLoop] Authentication refresh successful"
+                            )
                         except Exception as auth_e:
-                            logger.error(f"[RunnerLoop] Authentication refresh failed: {auth_e}")
+                            logger.error(
+                                f"[RunnerLoop] Authentication refresh failed: {auth_e}"
+                            )
                             # Don't stop the loop, but this will cause issues for the next runner() call
-                    
+
                     # Main challenge trigger
-                    if (run_on_startup and last_successful_run == 0) or (block > last_block and block % TEMPO == 0):
+                    if (run_on_startup and last_successful_run == 0) or (
+                        block > last_block and block % TEMPO == 0
+                    ):
                         should_run_main = True
                         logger.info(f"[RunnerLoop] Triggering runner at block {block}")
 
                     # Arena challenge trigger on separate cadence
                     if arena_enabled:
                         if (arena_run_on_startup and last_arena_block < 0) or (
-                            block > last_arena_block and block % arena_cadence_blocks == 0
+                            block > last_arena_block
+                            and block % arena_cadence_blocks == 0
                         ):
                             should_run_arena = True
                             logger.info(
@@ -1747,20 +1996,24 @@ async def runner_loop():
                             await asyncio.wait_for(st.wait_for_block(), timeout=60)
                         except asyncio.TimeoutError:
                             # Don't reset on timeout - just log and retry
-                            logger.debug("[RunnerLoop] wait_for_block timeout (60s) — retrying")
+                            logger.debug(
+                                "[RunnerLoop] wait_for_block timeout (60s) — retrying"
+                            )
                             await asyncio.sleep(5)
                         except Exception as e:
                             logger.warning(f"[RunnerLoop] wait_for_block error: {e}")
                             st = None
                             await reset_subtensor()
                         continue
-                        
+
                 except Exception as e:
                     # Block fetch failed - fall back to time-based scheduling
-                    logger.warning(f"[RunnerLoop] Block fetch failed: {type(e).__name__}: {e}")
+                    logger.warning(
+                        f"[RunnerLoop] Block fetch failed: {type(e).__name__}: {e}"
+                    )
                     st = None  # Force reconnection on next iteration
                     await reset_subtensor()  # Clear the global cached connection
-                    
+
                     if run_on_startup and last_successful_run == 0:
                         should_run_main = True
                         use_time_fallback = True
@@ -1771,9 +2024,14 @@ async def runner_loop():
                         block = None
                     else:
                         time_elapsed = time.time() - last_successful_run
-                        expected_interval = TEMPO * 12  # TEMPO blocks * ~12 seconds per block
-                    
-                        if last_successful_run > 0 and time_elapsed >= expected_interval:
+                        expected_interval = (
+                            TEMPO * 12
+                        )  # TEMPO blocks * ~12 seconds per block
+
+                        if (
+                            last_successful_run > 0
+                            and time_elapsed >= expected_interval
+                        ):
                             should_run_main = True
                             use_time_fallback = True
                             logger.warning(
@@ -1783,32 +2041,40 @@ async def runner_loop():
                         else:
                             # Not enough time has passed, or first run - skip and let retry logic handle it
                             if last_successful_run == 0:
-                                logger.info("[RunnerLoop] First run - will retry connection")
+                                logger.info(
+                                    "[RunnerLoop] First run - will retry connection"
+                                )
                             else:
-                                logger.info(f"[RunnerLoop] Only {time_elapsed:.0f}s elapsed (need {expected_interval:.0f}s), will retry")
+                                logger.info(
+                                    f"[RunnerLoop] Only {time_elapsed:.0f}s elapsed (need {expected_interval:.0f}s), will retry"
+                                )
                             raise  # Re-raise to trigger retry logic
-                        
+
                 if should_run_main:
                     if use_time_fallback:
-                        logger.info("[RunnerLoop] Running validation via time-based fallback (blockchain unreachable)")
+                        logger.info(
+                            "[RunnerLoop] Running validation via time-based fallback (blockchain unreachable)"
+                        )
                     _stderr_boot(
                         "trigger runner call "
                         f"use_time_fallback={use_time_fallback} "
                         f"block={block}",
                     )
-                    
+
                     await runner(subtensor=st if st is not None else None)
                     _stderr_boot("runner call completed")
-                    
+
                     if block is not None:
                         last_block = block
                     last_successful_run = time.time()
                     consecutive_failures = 0  # Reset after successful validation cycle
                     run_count += 1
                     logger.info(f"[RunnerLoop] Completed runner cycle #{run_count}")
-                    
+
                     if run_count >= 10:
-                        logger.info("[RunnerLoop] Reached 10 successful runs, resetting subtensor connection to free resources.")
+                        logger.info(
+                            "[RunnerLoop] Reached 10 successful runs, resetting subtensor connection to free resources."
+                        )
                         st = None
                         await reset_subtensor()
                         run_count = 0
@@ -1836,7 +2102,7 @@ async def runner_loop():
                 logger.warning(
                     f"[RunnerLoop] Error (attempt {consecutive_failures}/{MAX_SUBTENSOR_RETRIES}): {type(e).__name__}: {e}"
                 )
-                
+
                 if consecutive_failures >= MAX_SUBTENSOR_RETRIES:
                     logger.error(
                         f"[RunnerLoop] Max retries ({MAX_SUBTENSOR_RETRIES}) exceeded. "

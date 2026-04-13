@@ -19,9 +19,12 @@ from babelbit.utils.prometheus import (
     SCORES_BY_UID,
     CURRENT_WINNER,
 )
-from babelbit.utils.settings import get_settings
+from babelbit.utils.settings import Settings, get_settings
 from babelbit.utils.async_clients import get_async_client
-from babelbit.utils.utterance_auth import init_utterance_auth, authenticate_utterance_engine
+from babelbit.utils.utterance_auth import (
+    init_utterance_auth,
+    authenticate_utterance_engine,
+)
 from babelbit.utils.predict_utterances import get_current_challenge_uid
 from babelbit.utils.signing import sign_message
 from babelbit.utils.subtensor_gateway_client import SubtensorGatewayClient
@@ -31,7 +34,6 @@ logger = logging.getLogger("babelbit.validator")
 for noisy in ["websockets", "websockets.client", "substrateinterface", "urllib3"]:
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
-TRAILING_INCENTIVE_FRACTION = 0.05
 ARENA_INCENTIVE_PERCENT_ENV = "BB_ARENA_INCENTIVE_PERCENT"
 WEIGHT_SUM_TOLERANCE = 1e-9
 GET_SCORES_TIMEOUT_SECONDS = 30.0
@@ -92,16 +94,20 @@ def _to_api_challenge_type(value: Optional[str]) -> Optional[str]:
 
 
 def _get_arena_incentive_fraction() -> float:
-    raw_percent = os.getenv(ARENA_INCENTIVE_PERCENT_ENV, "0")
+    default_percent = float(Settings.model_fields["BB_ARENA_INCENTIVE_PERCENT"].default)
+    raw_percent = os.getenv(ARENA_INCENTIVE_PERCENT_ENV, "")
+    if not str(raw_percent).strip():
+        return default_percent / 100.0
     try:
         percent = float(raw_percent)
     except (TypeError, ValueError):
         logger.warning(
-            "Invalid %s=%r; defaulting to 0",
+            "Invalid %s=%r; defaulting to %.1f",
             ARENA_INCENTIVE_PERCENT_ENV,
             raw_percent,
+            default_percent,
         )
-        return 0.0
+        return default_percent / 100.0
 
     clamped_percent = min(max(percent, 0.0), 100.0)
     if clamped_percent != percent:
@@ -165,7 +171,10 @@ def _normalize_weight_vector(weights: List[float]) -> List[float]:
 
     total_weight = float(sum(weights))
     if total_weight <= 0.0:
-        logger.warning("Computed non-positive total weight %.12f; dropping weight vector", total_weight)
+        logger.warning(
+            "Computed non-positive total weight %.12f; dropping weight vector",
+            total_weight,
+        )
         return []
 
     normalized = [float(weight) for weight in weights]
@@ -189,7 +198,7 @@ async def _validate_main(tail: int, alpha: float, m_min: int, tempo: int):
     logger.info(
         (
             "Validator starting tail=%d alpha=%.3f tempo=%d netuid=%d hotkey=%s "
-            "arena_split=%.2f%% main_split=%.2f%% trailing_split=%.2f%%"
+            "arena_split=%.2f%% main_split=%.2f%%"
         ),
         tail,
         alpha,
@@ -198,14 +207,17 @@ async def _validate_main(tail: int, alpha: float, m_min: int, tempo: int):
         f"{settings.BITTENSOR_WALLET_HOT}",
         arena_incentive_fraction * 100.0,
         (1.0 - arena_incentive_fraction) * 100.0,
-        TRAILING_INCENTIVE_FRACTION * 100.0,
     )
 
     # Initialize utterance engine authentication
     utterance_engine_url = os.getenv("BB_UTTERANCE_ENGINE_URL", "http://localhost:8000")
     if utterance_engine_url:
         try:
-            init_utterance_auth(utterance_engine_url, settings.BITTENSOR_WALLET_COLD, settings.BITTENSOR_WALLET_HOT)
+            init_utterance_auth(
+                utterance_engine_url,
+                settings.BITTENSOR_WALLET_COLD,
+                settings.BITTENSOR_WALLET_HOT,
+            )
             await authenticate_utterance_engine()
             logger.info("✅ Utterance engine authentication successful")
         except Exception as e:
@@ -225,7 +237,9 @@ async def _validate_main(tail: int, alpha: float, m_min: int, tempo: int):
     MAX_NO_SCORE_ROUNDS = _get_int_env("BB_MAX_SKIPPED_WEIGHT_EPOCHS", 12)
     DEFAULT_FALLBACK_UID = _get_int_env("BB_DEFAULT_FALLBACK_UID", 248)
     last_set_weights: Optional[Tuple[List[int], List[float]]] = None
-    validator_kp = load_hotkey_keypair(settings.BITTENSOR_WALLET_COLD, settings.BITTENSOR_WALLET_HOT)
+    validator_kp = load_hotkey_keypair(
+        settings.BITTENSOR_WALLET_COLD, settings.BITTENSOR_WALLET_HOT
+    )
     last_challenge_uid: Optional[str] = None
     while True:
         try:
@@ -250,7 +264,9 @@ async def _validate_main(tail: int, alpha: float, m_min: int, tempo: int):
                 except asyncio.TimeoutError:
                     # Don't reset connection on timeout - just log and retry
                     # This is normal when blocks are slow or network is spotty
-                    logger.debug("wait_for_block timeout (60s) — will retry on next iteration")
+                    logger.debug(
+                        "wait_for_block timeout (60s) — will retry on next iteration"
+                    )
                     await asyncio.sleep(5)  # Brief sleep before retry
                 except Exception as e:
                     logger.warning("wait_for_block error from gateway: %s", e)
@@ -259,8 +275,12 @@ async def _validate_main(tail: int, alpha: float, m_min: int, tempo: int):
 
             # Determine current challenge for scoring API
             try:
-                current_challenge_uid = await get_current_challenge_uid(utterance_engine_url)
-                logger.debug("validate: current_challenge_uid=%s", current_challenge_uid)
+                current_challenge_uid = await get_current_challenge_uid(
+                    utterance_engine_url
+                )
+                logger.debug(
+                    "validate: current_challenge_uid=%s", current_challenge_uid
+                )
             except Exception as e:
                 current_challenge_uid = None
                 logger.warning("Unable to fetch current challenge UID: %s", e)
@@ -317,44 +337,22 @@ async def _validate_main(tail: int, alpha: float, m_min: int, tempo: int):
 
 
 def compute_weights(
-    winner_uid: Optional[int],
-    trailing_uid_dict: dict[int, float],
+    main_uid_scores: dict[int, float],
     arena_winner_uid: Optional[int] = None,
     arena_incentive_fraction: float = 0.0,
     burn_uid: Optional[int] = None,
 ):
-    # Sparse weights: keep trailing miners at fixed 5%, split the remaining 95%
-    # between main and arena winners.
-    positive_trailing = [
+    # Linear allocation for the main/qualifying share:
+    # distribute (1 - arena_fraction) proportionally to main scores.
+    positive_main = [
         (uid, max(float(score or 0.0), 0.0))
-        for uid, score in trailing_uid_dict.items()
+        for uid, score in main_uid_scores.items()
         if max(float(score or 0.0), 0.0) > 0.0
     ]
-    trailing_total = TRAILING_INCENTIVE_FRACTION if positive_trailing else 0.0
-    core_total = 1.0 - trailing_total
     arena_fraction = min(max(float(arena_incentive_fraction or 0.0), 0.0), 1.0)
+    main_fraction = 1.0 - arena_fraction
 
-    main_core = core_total * (1.0 - arena_fraction)
-    arena_core = core_total * arena_fraction
-    main_recipient_uid = winner_uid
-    arena_recipient_uid = arena_winner_uid
-
-    if winner_uid is None and arena_winner_uid is None and burn_uid is not None:
-        main_recipient_uid = burn_uid
-        arena_recipient_uid = burn_uid
-
-    if arena_winner_uid is None and arena_core > 0.0 and burn_uid is not None:
-        arena_recipient_uid = burn_uid
-
-    if arena_winner_uid is None:
-        if burn_uid is None:
-            main_core = core_total
-            arena_core = 0.0
-    if winner_uid is None:
-        arena_core = core_total
-        main_core = 0.0
-        if arena_winner_uid is None and burn_uid is not None:
-            arena_recipient_uid = burn_uid
+    arena_recipient_uid = arena_winner_uid if arena_winner_uid is not None else burn_uid
 
     weights_by_uid: dict[int, float] = {}
     ordered_uids: List[int] = []
@@ -367,22 +365,35 @@ def compute_weights(
             weights_by_uid[uid] = 0.0
         weights_by_uid[uid] += weight
 
-    add_uid(main_recipient_uid, main_core)
-    add_uid(arena_recipient_uid, arena_core)
+    if positive_main and main_fraction > 0.0:
+        total_main_score = sum(score for _, score in positive_main)
+        if total_main_score > 0.0:
+            for uid, score in positive_main:
+                add_uid(uid, main_fraction * (score / total_main_score))
+    elif main_fraction > 0.0 and burn_uid is not None:
+        add_uid(burn_uid, main_fraction)
 
-    if positive_trailing and trailing_total > 0.0:
-        total_trailing_score = sum(score for _, score in positive_trailing)
-        for uid, score in positive_trailing:
-            add_uid(uid, trailing_total * score / total_trailing_score)
+    if arena_fraction > 0.0:
+        if arena_recipient_uid is not None:
+            add_uid(arena_recipient_uid, arena_fraction)
+        elif positive_main and main_fraction > 0.0:
+            # No arena recipient configured: preserve total=1 by folding arena share
+            # into the linear main allocation.
+            total_main_score = sum(score for _, score in positive_main)
+            if total_main_score > 0.0:
+                for uid, score in positive_main:
+                    add_uid(uid, arena_fraction * (score / total_main_score))
 
-    if not ordered_uids and winner_uid is not None:
-        return [1.0], [winner_uid]
-    if not ordered_uids and arena_winner_uid is not None:
-        return [1.0], [arena_winner_uid]
+    if not ordered_uids and burn_uid is not None:
+        return [1.0], [burn_uid]
 
-    return _normalize_weight_vector([weights_by_uid[uid] for uid in ordered_uids]), ordered_uids
-        
+    return _normalize_weight_vector(
+        [weights_by_uid[uid] for uid in ordered_uids]
+    ), ordered_uids
+
+
 # ---------------- Weights selection ---------------- #
+
 
 async def get_weights(
     metagraph,
@@ -453,47 +464,41 @@ async def get_weights(
             main_scores, arena_scores = _extract_mode_scores(legacy_scores, hk_to_uid)
 
     if main_scores or arena_scores:
-        combined_hotkeys = list(dict.fromkeys(list(main_scores.keys()) + list(arena_scores.keys())))
+        combined_hotkeys = list(
+            dict.fromkeys(list(main_scores.keys()) + list(arena_scores.keys()))
+        )
 
         if combined_hotkeys:
-            winner_hk = max(main_scores, key=main_scores.get) if main_scores else None
-            arena_winner_hk = max(arena_scores, key=arena_scores.get) if arena_scores else None
+            winner_hk = (
+                max(main_scores, key=lambda hk: main_scores[hk])
+                if main_scores
+                else None
+            )
+            arena_winner_hk = (
+                max(arena_scores, key=lambda hk: arena_scores[hk])
+                if arena_scores
+                else None
+            )
             winner_uid = hk_to_uid.get(winner_hk) if winner_hk else None
-            arena_winner_uid = hk_to_uid.get(arena_winner_hk) if arena_winner_hk else None
+            arena_winner_uid = (
+                hk_to_uid.get(arena_winner_hk) if arena_winner_hk else None
+            )
 
-            trailing_uid_dict: dict[int, float] = {}
+            main_uid_scores: dict[int, float] = {}
             for hk in combined_hotkeys:
                 uid = hk_to_uid.get(hk)
                 if uid is None:
                     continue
-                if uid in {winner_uid, arena_winner_uid}:
-                    continue
                 main_score = main_scores.get(hk, 0.0)
-                arena_score = arena_scores.get(hk, 0.0)
-                composite = ((1.0 - arena_incentive_fraction) * main_score) + (
-                    arena_incentive_fraction * arena_score
-                )
-                if composite > 0.0:
-                    trailing_uid_dict[uid] = composite
+                if main_score > 0.0:
+                    main_uid_scores[uid] = main_score
 
-            if winner_uid is not None:
-                weights, uids = compute_weights(
-                    winner_uid,
-                    trailing_uid_dict,
-                    arena_winner_uid=arena_winner_uid,
-                    arena_incentive_fraction=arena_incentive_fraction,
-                    burn_uid=default_uid,
-                )
-            elif arena_winner_uid is not None:
-                weights, uids = compute_weights(
-                    arena_winner_uid,
-                    trailing_uid_dict,
-                    arena_winner_uid=arena_winner_uid,
-                    arena_incentive_fraction=1.0,
-                    burn_uid=default_uid,
-                )
-            else:
-                weights, uids = [], []
+            weights, uids = compute_weights(
+                main_uid_scores=main_uid_scores,
+                arena_winner_uid=arena_winner_uid,
+                arena_incentive_fraction=arena_incentive_fraction,
+                burn_uid=default_uid,
+            )
 
             # Prometheus (optional)
             for hk in combined_hotkeys:
@@ -516,7 +521,9 @@ async def get_weights(
                     "(challenge=%s)"
                 ),
                 f"{winner_hk[:8]}… uid={winner_uid}" if winner_hk else "none",
-                f"{arena_winner_hk[:8]}… uid={arena_winner_uid}" if arena_winner_hk else "none",
+                f"{arena_winner_hk[:8]}… uid={arena_winner_uid}"
+                if arena_winner_hk
+                else "none",
                 arena_incentive_fraction * 100.0,
                 (1.0 - arena_incentive_fraction) * 100.0,
                 challenge_uid or "unknown",
@@ -625,7 +632,9 @@ async def retry_set_weights(wallet, uids, weights):
     import aiohttp
 
     try:
-        timeout = aiohttp.ClientTimeout(connect=5, total=300)  # Increased timeout for block confirmation
+        timeout = aiohttp.ClientTimeout(
+            connect=5, total=300
+        )  # Increased timeout for block confirmation
         async with aiohttp.ClientSession(timeout=timeout) as sess:
             resp = await sess.post(
                 f"{signer_url}/set_weights",
@@ -642,6 +651,11 @@ async def retry_set_weights(wallet, uids, weights):
                 data = {"raw": await resp.text()}
             if resp.status == 200 and data.get("success"):
                 return True
+            if data.get("error") == "confirmation failed":
+                logger.info(
+                    "Signer could not confirm set_weights; skipping duplicate local fallback"
+                )
+                return False
             logger.warning(f"Signer error status={resp.status} body={data}")
     except aiohttp.ClientConnectorError as e:
         logger.info(f"Signer unreachable: {e} — falling back to local set_weights")
@@ -649,7 +663,9 @@ async def retry_set_weights(wallet, uids, weights):
         logger.warning("Signer timed out — falling back to local set_weights")
 
     # ---- Fallback via subtensor gateway ----
-    retries = int(os.getenv("BB_SET_WEIGHTS_RETRIES", os.getenv("SIGNER_RETRIES", "20")))
+    retries = int(
+        os.getenv("BB_SET_WEIGHTS_RETRIES", os.getenv("SIGNER_RETRIES", "20"))
+    )
     delay_s = float(
         os.getenv("BB_SET_WEIGHTS_RETRY_DELAY", os.getenv("SIGNER_RETRY_DELAY", "2"))
     )
