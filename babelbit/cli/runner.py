@@ -989,6 +989,7 @@ def _build_round2_prediction_callback(
     from babelbit.utils.predict_engine import call_managed_route_endpoint
 
     first_call_seen: set[str] = set()
+    startup_budget_spent: set[str] = set()
 
     def _is_non_retryable_startup_error(error: str) -> bool:
         lowered = str(error or "").strip().lower()
@@ -1016,7 +1017,10 @@ def _build_round2_prediction_callback(
         )
         step_value = getattr(payload, "step", "?")
         miner_hotkey = getattr(miner, "hotkey", "") or ""
-        is_startup_call = miner_hotkey not in first_call_seen
+        is_startup_call = (
+            miner_hotkey not in first_call_seen
+            and miner_hotkey not in startup_budget_spent
+        )
         effective_timeout = miner_timeout
         if route is None:
             _trace_miner_call(
@@ -1038,45 +1042,53 @@ def _build_round2_prediction_callback(
                 startup_deadline = time.monotonic() + max(1.0, float(startup_timeout))
                 startup_attempt = 0
                 last_error = "arena_startup_timeout"
-                while True:
-                    remaining = startup_deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise RuntimeError(last_error)
+                startup_cancelled = False
+                try:
+                    while True:
+                        remaining = startup_deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise RuntimeError(last_error)
 
-                    startup_attempt += 1
-                    result = await call_managed_route_endpoint(
-                        route=route,
-                        payload=payload,
-                        context_used=context,
-                        miner_hotkey=miner.hotkey,
-                        timeout=min(
-                            float(startup_request_timeout), max(0.1, remaining)
-                        ),
-                    )
-                    prediction_text = ""
-                    if result.utterance:
-                        prediction_text = result.utterance.prediction or ""
-                    if result.success and prediction_text:
-                        first_call_seen.add(miner_hotkey)
-                        break
+                        startup_attempt += 1
+                        result = await call_managed_route_endpoint(
+                            route=route,
+                            payload=payload,
+                            context_used=context,
+                            miner_hotkey=miner.hotkey,
+                            timeout=min(
+                                float(startup_request_timeout), max(0.1, remaining)
+                            ),
+                        )
+                        prediction_text = ""
+                        if result.utterance:
+                            prediction_text = result.utterance.prediction or ""
+                        if result.success and prediction_text:
+                            first_call_seen.add(miner_hotkey)
+                            break
 
-                    last_error = str(result.error or "arena_startup_predict_failed")
-                    if result.success and not prediction_text:
-                        last_error = "arena_startup_predict_failed:empty_prediction"
+                        last_error = str(result.error or "arena_startup_predict_failed")
+                        if result.success and not prediction_text:
+                            last_error = "arena_startup_predict_failed:empty_prediction"
 
-                    if _is_non_retryable_startup_error(last_error):
-                        raise RuntimeError(last_error)
+                        if _is_non_retryable_startup_error(last_error):
+                            raise RuntimeError(last_error)
 
-                    logger.info(
-                        "Arena startup retry pending for uid=%s hotkey=%s attempt=%d error=%s",
-                        miner_uid,
-                        miner_hotkey_short,
-                        startup_attempt,
-                        last_error,
-                    )
-                    await asyncio.sleep(
-                        min(1.0, max(0.0, startup_deadline - time.monotonic()))
-                    )
+                        logger.info(
+                            "Arena startup retry pending for uid=%s hotkey=%s attempt=%d error=%s",
+                            miner_uid,
+                            miner_hotkey_short,
+                            startup_attempt,
+                            last_error,
+                        )
+                        await asyncio.sleep(
+                            min(1.0, max(0.0, startup_deadline - time.monotonic()))
+                        )
+                except asyncio.CancelledError:
+                    startup_cancelled = True
+                    raise
+                finally:
+                    if not startup_cancelled:
+                        startup_budget_spent.add(miner_hotkey)
             else:
                 result = await call_managed_route_endpoint(
                     route=route,

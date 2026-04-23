@@ -4,6 +4,7 @@ from time import monotonic
 import time
 from threading import Lock
 import uuid
+import asyncio
 from typing import Any, Optional
 from urllib.parse import urlparse, urlunparse
 
@@ -20,6 +21,7 @@ logger = getLogger(__name__)
 
 _VALIDATOR_IDENTITY_CACHE = None
 _GATEWAY_AUTH_TOKEN_CACHE: dict[str, tuple[str, float]] = {}
+_GATEWAY_AUTH_TOKEN_INFLIGHT: dict[str, asyncio.Future[tuple[str, int, str]]] = {}
 _GATEWAY_AUTH_TOKEN_LOCK = Lock()
 _GATEWAY_AUTH_TOKEN_TTL_FALLBACK_S = 1800
 
@@ -111,11 +113,8 @@ def _gateway_auth_cache_key(
     *,
     auth_url: str,
     validator_hotkey: str,
-    miner_hotkey: str,
-    miner_uid: int,
 ) -> str:
-    # Some gateways scope auth sessions by target miner identity.
-    return f"{auth_url}|{validator_hotkey}|{miner_hotkey}|{miner_uid}"
+    return f"{auth_url}|{validator_hotkey}"
 
 
 def _get_cached_gateway_auth_token(cache_key: str) -> str:
@@ -140,6 +139,58 @@ def _store_gateway_auth_token(cache_key: str, token: str, ttl_seconds: int) -> N
 def _clear_gateway_auth_token(cache_key: str) -> None:
     with _GATEWAY_AUTH_TOKEN_LOCK:
         _GATEWAY_AUTH_TOKEN_CACHE.pop(cache_key, None)
+
+
+async def _get_or_request_gateway_auth_token(
+    *,
+    cache_key: str,
+    auth_url: str,
+    validator_identity: dict[str, Any],
+    miner_hotkey: str,
+    miner_uid: int,
+    timeout: float,
+) -> tuple[str, int, str]:
+    now = time.time()
+    future: asyncio.Future[tuple[str, int, str]] | None = None
+    created_future = False
+
+    with _GATEWAY_AUTH_TOKEN_LOCK:
+        cached = _GATEWAY_AUTH_TOKEN_CACHE.get(cache_key)
+        if cached:
+            token, expires_at = cached
+            if expires_at > now:
+                return token, max(0, int(expires_at - now)), ""
+            _GATEWAY_AUTH_TOKEN_CACHE.pop(cache_key, None)
+
+        future = _GATEWAY_AUTH_TOKEN_INFLIGHT.get(cache_key)
+        if future is None:
+            future = asyncio.get_running_loop().create_future()
+            _GATEWAY_AUTH_TOKEN_INFLIGHT[cache_key] = future
+            created_future = True
+
+    if not created_future:
+        return await future
+
+    try:
+        token, expires_in, auth_error = await _request_gateway_auth_token(
+            auth_url=auth_url,
+            validator_identity=validator_identity,
+            miner_hotkey=miner_hotkey,
+            miner_uid=miner_uid,
+            timeout=timeout,
+        )
+        if token:
+            _store_gateway_auth_token(cache_key, token, expires_in)
+        future.set_result((token, expires_in, auth_error))
+        return token, expires_in, auth_error
+    except Exception as exc:
+        future.set_exception(exc)
+        raise
+    finally:
+        with _GATEWAY_AUTH_TOKEN_LOCK:
+            current = _GATEWAY_AUTH_TOKEN_INFLIGHT.get(cache_key)
+            if current is future:
+                _GATEWAY_AUTH_TOKEN_INFLIGHT.pop(cache_key, None)
 
 
 async def _request_gateway_auth_token(
@@ -625,18 +676,16 @@ async def call_gateway_runsync_endpoint(
     auth_cache_key = _gateway_auth_cache_key(
         auth_url=gateway_auth_url,
         validator_hotkey=str(validator_identity["hotkey"]),
-        miner_hotkey=str(miner_hotkey),
-        miner_uid=int(miner_uid),
     )
 
     session = await get_async_client()
     t0 = monotonic()
     try:
-        auth_token = _get_cached_gateway_auth_token(auth_cache_key)
-
         for attempt in range(2):
+            auth_token = _get_cached_gateway_auth_token(auth_cache_key)
             if not auth_token:
-                token, expires_in, auth_error = await _request_gateway_auth_token(
+                token, expires_in, auth_error = await _get_or_request_gateway_auth_token(
+                    cache_key=auth_cache_key,
                     auth_url=gateway_auth_url,
                     validator_identity=validator_identity,
                     miner_hotkey=str(miner_hotkey),
@@ -653,7 +702,6 @@ async def call_gateway_runsync_endpoint(
                         complete=False,
                     )
                 auth_token = token
-                _store_gateway_auth_token(auth_cache_key, auth_token, expires_in)
 
             request_body: dict[str, Any] = {
                 "input": gateway_input_payload,

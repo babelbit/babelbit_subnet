@@ -465,11 +465,14 @@ async def predict_with_utterance_engine_multi_miner(
                     else:
                         effective_timeout = timeout
 
-                    if first_step_timeout is not None and any(
-                        miner_active[mk] and not miner_started[mk] for mk in miner_active
-                    ):
+                    if first_step_timeout is not None and prediction_round == 0:
                         try:
-                            effective_timeout = max(effective_timeout, float(first_step_timeout))
+                            startup_timeout = float(first_step_timeout)
+                            # Preserve the longer first-step budget for single-miner flows,
+                            # but do not let one cold miner stall an entire synchronized
+                            # arena batch. Slow miners can keep retrying on subsequent steps.
+                            if len(prediction_tasks) <= 1:
+                                effective_timeout = max(effective_timeout, startup_timeout)
                         except Exception:
                             pass
 

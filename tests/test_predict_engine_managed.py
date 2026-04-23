@@ -402,15 +402,15 @@ async def test_call_managed_route_endpoint_gateway_auth_retries_legacy_hotkey_on
 
 
 @pytest.mark.asyncio
-async def test_call_managed_route_endpoint_gateway_auth_cache_is_scoped_per_miner(payload, mock_settings):
+async def test_call_managed_route_endpoint_gateway_auth_cache_is_scoped_per_validator(payload, mock_settings):
     from babelbit.utils import predict_engine as pe
     pe._GATEWAY_AUTH_TOKEN_CACHE.clear()
+    pe._GATEWAY_AUTH_TOKEN_INFLIGHT.clear()
 
     session = _Session(
         responses=[
             _Response(200, '{"status":"ok","auth_token":"gateway-token-1","expires_in":1800}'),
             _Response(200, '{"status":"COMPLETED","output":{"prediction":"first"}}'),
-            _Response(200, '{"status":"ok","auth_token":"gateway-token-2","expires_in":1800}'),
             _Response(200, '{"status":"COMPLETED","output":{"prediction":"second"}}'),
         ]
     )
@@ -453,8 +453,73 @@ async def test_call_managed_route_endpoint_gateway_auth_cache_is_scoped_per_mine
 
     assert result_1.success is True
     assert result_2.success is True
-    assert len(session.calls) == 4
+    assert len(session.calls) == 3
     assert session.calls[0]["args"][0] == "https://scoring.babelbit.ai/auth/token"
     assert session.calls[1]["args"][0] == "https://scoring.babelbit.ai/runsync"
-    assert session.calls[2]["args"][0] == "https://scoring.babelbit.ai/auth/token"
-    assert session.calls[3]["args"][0] == "https://scoring.babelbit.ai/runsync"
+    assert session.calls[2]["args"][0] == "https://scoring.babelbit.ai/runsync"
+
+
+@pytest.mark.asyncio
+async def test_call_managed_route_endpoint_gateway_deduplicates_concurrent_auth_requests(payload, mock_settings):
+    from babelbit.utils import predict_engine as pe
+    pe._GATEWAY_AUTH_TOKEN_CACHE.clear()
+    pe._GATEWAY_AUTH_TOKEN_INFLIGHT.clear()
+
+    session = _Session(
+        responses=[
+            _Response(200, '{"status":"COMPLETED","output":{"prediction":"first"}}'),
+            _Response(200, '{"status":"COMPLETED","output":{"prediction":"second"}}'),
+        ]
+    )
+    route_1 = ManagedRoute(
+        miner_hotkey="hk1",
+        miner_uid=7,
+        endpoint_url="https://scoring.babelbit.ai/runsync",
+        provider="gateway",
+    )
+    route_2 = ManagedRoute(
+        miner_hotkey="hk2",
+        miner_uid=8,
+        endpoint_url="https://scoring.babelbit.ai/runsync",
+        provider="gateway",
+    )
+    validator_identity = {
+        "keypair": _FakeKeypair(),
+        "hotkey": _FakeKeypair.ss58_address,
+        "external_ip": "1.2.3.4",
+        "uuid": "validator-uuid",
+    }
+    auth_calls = []
+
+    async def _fake_request_gateway_auth_token(**kwargs):
+        auth_calls.append(kwargs)
+        await asyncio.sleep(0.01)
+        return "gateway-token", 1800, ""
+
+    with patch("babelbit.utils.predict_engine.get_settings", return_value=mock_settings), \
+         patch("babelbit.utils.predict_engine.get_async_client", new_callable=AsyncMock, return_value=session), \
+         patch("babelbit.utils.predict_engine._get_validator_identity", return_value=validator_identity), \
+         patch("babelbit.utils.predict_engine._request_gateway_auth_token", side_effect=_fake_request_gateway_auth_token):
+        result_1, result_2 = await asyncio.gather(
+            call_managed_route_endpoint(
+                route=route_1,
+                payload=payload,
+                context_used="ctx",
+                miner_hotkey="hk1",
+                timeout=5,
+            ),
+            call_managed_route_endpoint(
+                route=route_2,
+                payload=payload,
+                context_used="ctx",
+                miner_hotkey="hk2",
+                timeout=5,
+            ),
+        )
+
+    assert result_1.success is True
+    assert result_2.success is True
+    assert len(auth_calls) == 1
+    assert len(session.calls) == 2
+    assert session.calls[0]["args"][0] == "https://scoring.babelbit.ai/runsync"
+    assert session.calls[1]["args"][0] == "https://scoring.babelbit.ai/runsync"
