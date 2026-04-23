@@ -13,6 +13,7 @@ authors = [{ name = "Babelbit" }]
 # Core runtime deps
 dependencies = [
   "substrate-interface",
+  "async-substrate-interface==1.5.15",
   "pydantic>=2",
   "httpx",
   "python-dotenv>=0.21.0",
